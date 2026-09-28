@@ -1,0 +1,325 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Thịnh & Thảo Như 💕 - Phòng Nghe Nhạc Đôi Lãng Mạn</title>
+  <meta name="description" content="Phòng nghe nhạc đôi lãng mạn dành riêng cho Thịnh và Thảo Như.">
+  
+  <!-- Google Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Dancing+Script:wght@600;700&display=swap" rel="stylesheet">
+
+  <!-- Main CSS -->
+  <link rel="stylesheet" href="css/style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>💖</text></svg>">
+</head>
+<body>
+
+  <!-- Floating Ambient Blur Orbs -->
+  <div class="ambient-decor" aria-hidden="true">
+    <div class="ambient-orb ambient-orb-1"></div>
+    <div class="ambient-orb ambient-orb-2"></div>
+    <div class="ambient-orb ambient-orb-3"></div>
+  </div>
+
+  <!-- Realtime Hearts & Particle Canvas -->
+  <canvas id="hearts-canvas"></canvas>
+
+  <div class="app-wrapper">
+
+    <!-- 🌸 Top Header Navigation -->
+    <header class="header-glass" role="banner">
+      <div class="brand-section">
+        <div class="brand-heart-icon" title="LoveTunes">♥</div>
+        <div>
+          <h1 class="brand-title">Thịnh &amp; Thảo Như</h1>
+          <span class="brand-sub">Giai điệu tình yêu của chúng mình 🎧</span>
+        </div>
+      </div>
+
+      <!-- Room Code & Invite Action -->
+      <div class="room-badge-group">
+        <div class="room-chip" id="room-display-chip">
+          <span>Phòng:</span>
+          <span class="room-code-tag" id="current-room-code">LOVE-0000</span>
+        </div>
+        <button class="btn-pill btn-pill-primary" id="btn-copy-room-link" title="Sao chép liên kết phòng gửi cho Thảo Như">
+          <span>💌</span>
+          <span>Mời Thảo Như</span>
+        </button>
+      </div>
+
+      <!-- Couple Status & Presence -->
+      <div class="couple-status-box">
+        <div class="couple-avatar-pair">
+          <div class="avatar-bubble" id="my-avatar-bubble" title="Bạn (Nhấn để đổi tên)">🌸</div>
+          <span class="love-heart-connector">💖</span>
+          <div class="avatar-bubble avatar-bubble-partner" id="partner-avatar-bubble" title="Người yêu">🤍</div>
+        </div>
+        <div class="couple-text-info">
+          <span class="together-counter">
+            <span>Cùng nghe:</span>
+            <span class="together-timer-badge" id="together-timer-badge">00:00:00</span>
+          </span>
+          <span class="partner-state-pill" id="partner-state-pill">Đang chờ Thảo Như vào phòng...</span>
+        </div>
+      </div>
+    </header>
+
+    <!-- 🎶 Main Stage Grid -->
+    <main class="main-stage" role="main">
+
+      <!-- Left Column: The Player Stage -->
+      <section class="player-container-glass" aria-label="Bộ phát nhạc đôi">
+        <!-- Audio Autoplay Unlock Banner -->
+        <div class="audio-unlock-banner" id="audio-unlock-banner">
+          <span>🎧</span>
+          <span>Chạm vào đây để kích hoạt âm thanh &amp; bắt đầu nghe nhạc cùng nhau nhé! 💕</span>
+        </div>
+
+        <div class="player-top-header-row">
+          <div class="sweet-quote-banner">
+            <span>✨</span>
+            <span>Thịnh yêu Thảo Như nhất trên đời</span>
+            <span>✨</span>
+          </div>
+          <button class="btn-pill btn-toggle-view" id="btn-toggle-view" title="Chuyển đổi Đĩa Than / Xem MV">
+            <span>📺</span>
+            <span>Xem MV</span>
+          </button>
+        </div>
+
+        <!-- Turntable Vinyl Stage -->
+        <div class="turntable-wrapper" id="turntable-area">
+          <div class="vinyl-disc" id="vinyl-disc">
+            <div class="vinyl-grooves"></div>
+            <div class="vinyl-center-label">
+              <img id="album-cover-img" class="album-cover-img" src="https://images.unsplash.com/photo-1518895949257-7621c3c786d7?w=500&auto=format&fit=crop&q=80" alt="Album Cover">
+              <div class="vinyl-center-hole">♥</div>
+            </div>
+          </div>
+
+          <!-- Turntable Needle Tonearm -->
+          <div class="tonearm" id="tonearm">
+            <div class="tonearm-base"></div>
+            <div class="tonearm-rod"></div>
+            <div class="tonearm-head"></div>
+          </div>
+        </div>
+
+        <!-- Song Metadata -->
+        <div class="track-info-card">
+          <div class="track-source-tag" id="track-source-tag">
+            <span>▶️</span> YouTube Audio
+          </div>
+          <h2 class="track-title" id="track-title">Chọn bài hát để bắt đầu</h2>
+          <div class="track-artist" id="track-artist">LoveTunes Playlist</div>
+        </div>
+
+        <!-- Audio Waveform Visualizer -->
+        <div class="waveform-bars" aria-hidden="true">
+          <div class="wave-bar"></div>
+          <div class="wave-bar"></div>
+          <div class="wave-bar"></div>
+          <div class="wave-bar"></div>
+          <div class="wave-bar"></div>
+          <div class="wave-bar"></div>
+          <div class="wave-bar"></div>
+          <div class="wave-bar"></div>
+        </div>
+
+        <!-- Seekbar Area -->
+        <div class="player-progress-area">
+          <div class="seek-slider-container" id="seek-slider-container" title="Kéo để chỉnh vị trí phát">
+            <div class="seek-track-bg">
+              <div class="seek-track-fill" id="seek-track-fill"></div>
+            </div>
+            <div class="seek-thumb" id="seek-thumb"></div>
+          </div>
+          <div class="progress-timestamps">
+            <span id="timestamp-current">00:00</span>
+            <span id="timestamp-total">00:00</span>
+          </div>
+        </div>
+
+        <!-- Playback Controls Bar -->
+        <div class="player-controls-row">
+          <button class="ctrl-btn" id="btn-prev" title="Phát lại từ đầu">⏮</button>
+          <button class="ctrl-btn ctrl-btn-play" id="btn-play-toggle" title="Phát / Dừng cùng người yêu">
+            <span id="play-btn-icon">▶</span>
+          </button>
+          <button class="ctrl-btn" id="btn-next" title="Bài tiếp theo trong hàng đợi">⏭</button>
+        </div>
+
+        <!-- Extra Controls: Sync & Volume -->
+        <div class="player-extra-bar">
+          <button class="btn-sync-now" id="btn-instant-sync" title="Đồng bộ lại nếu mạng bị lệch nhịp">
+            <span>⚡</span>
+            <span>Đồng bộ tức thì</span>
+          </button>
+
+          <div class="volume-container">
+            <button class="volume-icon-btn" id="volume-icon">🔊</button>
+            <input type="range" class="volume-slider" id="volume-slider" min="0" max="100" value="85" title="Âm lượng">
+          </div>
+        </div>
+
+        <!-- Love Reactions Bar -->
+        <div class="love-reactions-panel">
+          <button class="reaction-btn" data-emoji="💖" title="Thả tim">💖</button>
+          <button class="reaction-btn" data-emoji="🌸" title="Gửi hoa">🌸</button>
+          <button class="reaction-btn" data-emoji="🥰" title="Thương yêu">🥰</button>
+          <button class="reaction-btn" data-emoji="✨" title="Lấp lánh">✨</button>
+          <button class="reaction-btn" data-emoji="🍓" title="Dâu tây">🍓</button>
+          <button class="reaction-btn" data-emoji="💌" title="Thư tình">💌</button>
+          <button class="btn-burst-hearts" id="btn-burst-hearts" title="Bắn cơn mưa tim qua màn hình người yêu">
+            <span>💖 Bão Tim</span>
+          </button>
+        </div>
+
+        <!-- Background Sync Engine (YouTube IFrame) -->
+        <div class="yt-player-box">
+          <div id="yt-player-target"></div>
+        </div>
+      </section>
+
+      <!-- Right Column: Tabs Panel (Thịnh hành, Tìm kiếm/Link, Hàng đợi, Chat) -->
+      <section class="interactions-container-glass" aria-label="Tương tác và chọn nhạc">
+        
+        <!-- Navigation Tabs -->
+        <nav class="tabs-nav-bar" role="tablist">
+          <button class="tab-nav-btn active" data-tab="curated" role="tab" id="tab-btn-curated">
+            <span>🔥</span> Thịnh Hành
+          </button>
+          <button class="tab-nav-btn" data-tab="search" role="tab" id="tab-btn-search">
+            <span>🔍</span> Tìm & Link
+          </button>
+          <button class="tab-nav-btn" data-tab="queue" role="tab" id="tab-btn-queue">
+            <span>📜</span> Hàng Đợi <span class="badge-count" id="queue-count-badge">0</span>
+          </button>
+          <button class="tab-nav-btn" data-tab="chat" role="tab" id="tab-btn-chat">
+            <span>💬</span> Lời Yêu
+          </button>
+        </nav>
+
+        <div class="tab-panes-wrapper">
+
+          <!-- Pane 1: Curated Hits -->
+          <div class="tab-pane active" id="pane-curated" role="tabpanel">
+            <div id="curated-playlists-container">
+              <!-- Dynamically populated from playlists.js -->
+            </div>
+          </div>
+
+          <!-- Pane 2: Search & Link Resolver -->
+          <div class="tab-pane" id="pane-search" role="tabpanel">
+            
+            <!-- Paste Spotify or YouTube Link -->
+            <div class="link-resolver-card">
+              <div class="link-resolver-label">
+                <span>🔗</span>
+                <span>Dán link Spotify hoặc YouTube để nghe:</span>
+              </div>
+              <div class="link-input-row">
+                <input type="text" class="custom-input" id="direct-url-input" placeholder="Ví dụ: open.spotify.com/track/... hoặc youtube.com/watch?v=...">
+                <button class="btn-resolve-link" id="btn-resolve-url">Thêm ngay</button>
+              </div>
+            </div>
+
+            <!-- YouTube Search Bar -->
+            <div class="search-input-box">
+              <span class="search-input-icon">🔍</span>
+              <input type="text" class="custom-input" id="search-query-input" placeholder="Tìm tên bài hát hoặc ca sĩ yêu thích...">
+            </div>
+
+            <div class="search-results-list" id="search-results-list">
+              <div style="text-align: center; padding: 30px; color: var(--text-muted); font-size: 13px;">
+                Nhập tên bài hát hoặc dán link Spotify/YouTube để cùng thưởng thức nhé! 🎶
+              </div>
+            </div>
+          </div>
+
+          <!-- Pane 3: Shared Queue -->
+          <div class="tab-pane" id="pane-queue" role="tabpanel">
+            <div class="queue-header-stats">
+              <span>Danh sách chờ phát</span>
+              <span style="font-size: 11px; color: var(--primary-pink); font-weight: 600;">Tự động chuyển bài khi kết thúc</span>
+            </div>
+            <div class="queue-items-container" id="queue-items-container">
+              <!-- Populated dynamically -->
+            </div>
+          </div>
+
+          <!-- Pane 4: Love Chat -->
+          <div class="tab-pane" id="pane-chat" role="tabpanel">
+            <div class="love-chat-container">
+              <div class="chat-history-box" id="chat-history-box">
+                <!-- Messages populated dynamically -->
+              </div>
+
+              <!-- Quick Sweet Note Chips -->
+              <div class="quick-sweet-notes">
+                <button class="btn-sweet-chip" data-text="Bài này Thịnh tặng riêng cho Thảo Như nè! ❤️">Tặng Như nè ❤️</button>
+                <button class="btn-sweet-chip" data-text="Thịnh nhớ Thảo Như quá đi... 💕">Nhớ Như 💕</button>
+                <button class="btn-sweet-chip" data-text="Giai điệu này Như thích đúng hông! 🌸">Như thích nè 🌸</button>
+                <button class="btn-sweet-chip" data-text="Hát theo cùng Thịnh nha! 🎤">Hát cùng Thịnh 🎤</button>
+                <button class="btn-sweet-chip" data-text="Thịnh yêu Thảo Như nhất trên đời! ✨">Yêu Như nhất ✨</button>
+              </div>
+
+              <!-- Input bar -->
+              <div class="chat-input-bar">
+                <input type="text" class="custom-input" id="chat-message-input" placeholder="Nhắn lời ngọt ngào gửi người yêu...">
+                <button class="btn-chat-send" id="btn-send-chat" title="Gửi tin nhắn">💌</button>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- Profile / Nickname Modal -->
+  <div class="modal-overlay" id="profile-modal">
+    <div class="modal-glass-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h3 class="modal-title" id="modal-title">Thông Tin Của Bạn 🌸</h3>
+      <p class="modal-subtitle">Đặt biệt danh ngọt ngào để người yêu nhìn thấy nhé!</p>
+
+      <div class="form-group">
+        <label class="form-label" for="profile-name-input">Biệt danh của bạn:</label>
+        <input type="text" class="custom-input" id="profile-name-input" placeholder="Ví dụ: Anh Yêu, Bé Điệu, v.v.">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">Chọn biểu tượng dễ thương:</label>
+        <div class="avatar-selector-row">
+          <button class="avatar-option-btn" data-avatar="🌸">🌸</button>
+          <button class="avatar-option-btn" data-avatar="💖">💖</button>
+          <button class="avatar-option-btn" data-avatar="🐰">🐰</button>
+          <button class="avatar-option-btn" data-avatar="🐱">🐱</button>
+          <button class="avatar-option-btn" data-avatar="🍓">🍓</button>
+          <button class="avatar-option-btn" data-avatar="✨">✨</button>
+        </div>
+      </div>
+
+      <div style="display: flex; gap: 10px; margin-top: 20px;">
+        <button class="btn-pill" id="btn-close-modal" style="flex: 1; justify-content: center;">Hủy</button>
+        <button class="btn-block-action" id="btn-save-profile" style="flex: 1.5;">Lưu Lại</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toast Container -->
+  <div class="toast-container" id="toast-container" aria-live="polite"></div>
+
+  <!-- Scripts -->
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="js/playlists.js"></script>
+  <script src="js/effects.js"></script>
+  <script src="js/player.js"></script>
+  <script src="js/app.js"></script>
+</body>
+</html>
