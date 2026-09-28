@@ -185,6 +185,17 @@ class LoveTunesApp {
     this.socket.on('track_changed', ({ track, isPlaying, currentTime, triggeredBy }) => {
       this.player.loadTrack(track, isPlaying, currentTime);
       this.showToast(`🎶 Đang phát: ${track.title}`);
+
+      // Check if mobile blocked background autoplay for partner
+      setTimeout(() => {
+        if (this.player.player && typeof this.player.player.getPlayerState === 'function') {
+          const state = this.player.player.getPlayerState();
+          // If song is supposed to be playing but mobile browser kept it paused/unstarted
+          if (isPlaying && state !== 1 && state !== 3) {
+            this.showMobilePlayPrompt(track, triggeredBy);
+          }
+        }
+      }, 1200);
     });
 
     this.socket.on('playback_sync', ({ isPlaying, currentTime, triggeredBy }) => {
@@ -373,22 +384,62 @@ class LoveTunesApp {
       </div>
     `;
 
-    card.querySelector('.btn-play-now').addEventListener('click', (e) => {
+    const handlePlayAction = (e) => {
       e.stopPropagation();
+      this.player.unlockAudio();
+      this.player.loadTrack(track, true, 0);
       this.socket.emit('play_track', { track });
       this.effects.burst('🎵', 8);
-    });
+    };
+
+    const playBtn = card.querySelector('.btn-play-now');
+    playBtn.addEventListener('click', handlePlayAction);
+    playBtn.addEventListener('touchend', handlePlayAction);
 
     card.querySelector('.btn-queue-add').addEventListener('click', (e) => {
       e.stopPropagation();
+      this.player.unlockAudio();
       this.socket.emit('add_to_queue', { track });
     });
 
-    card.addEventListener('click', () => {
-      this.socket.emit('play_track', { track });
+    card.addEventListener('click', (e) => {
+      if (!e.target.closest('.btn-queue-add')) {
+        handlePlayAction(e);
+      }
     });
 
     return card;
+  }
+
+  showMobilePlayPrompt(track, triggeredBy) {
+    document.getElementById('mobile-sync-prompt')?.remove();
+
+    const prompt = document.createElement('div');
+    prompt.id = 'mobile-sync-prompt';
+    prompt.className = 'mobile-sync-prompt';
+    prompt.innerHTML = `
+      <div class="prompt-content">
+        <span class="prompt-icon">🎧</span>
+        <div class="prompt-info">
+          <div class="prompt-title"><strong>${triggeredBy}</strong> vừa phát nhạc:</div>
+          <div class="prompt-song">${track.title}</div>
+        </div>
+      </div>
+      <button class="btn-prompt-listen">Chạm Để Cùng Nghe 💕</button>
+    `;
+
+    const handlePromptTap = (e) => {
+      e?.preventDefault();
+      this.player.unlockAudio();
+      this.player.loadTrack(track, true, 0);
+      prompt.remove();
+      this.effects.burst('💖', 12);
+    };
+
+    prompt.addEventListener('click', handlePromptTap);
+    prompt.addEventListener('touchend', handlePromptTap);
+
+    document.body.appendChild(prompt);
   }
 
   // YouTube Search

@@ -1,4 +1,4 @@
-// Player & Real-time Playback Sync Controller with Auto-unmute & Error 150 Fallback
+// Player & Real-time Playback Sync Controller (Optimized for Mobile iOS & Android)
 
 class LovePlayer {
   constructor(socketClient) {
@@ -7,10 +7,11 @@ class LovePlayer {
     this.isReady = false;
     this.currentTrack = null;
     this.isPlaying = false;
-    this.isRemoteAction = false; // Flag to prevent infinite broadcast loops
+    this.isRemoteAction = false;
     this.seekDragging = false;
-    this.driftThreshold = 2.0; // Seconds of allowed drift before soft seeking
+    this.driftThreshold = 2.0;
     this.isMvMode = false;
+    this.audioUnlocked = false;
 
     // DOM Elements
     this.elDisc = document.getElementById('vinyl-disc');
@@ -44,17 +45,16 @@ class LovePlayer {
       this.player = new YT.Player('yt-player-target', {
         height: '100%',
         width: '100%',
-        videoId: '',
+        videoId: 'FN7ALfpGxiI', // Preload initial verified track
         playerVars: {
-          autoplay: 1,
+          autoplay: 0,
           controls: 1,
           disablekb: 0,
           enablejsapi: 1,
           fs: 1,
           modestbranding: 1,
           playsinline: 1,
-          rel: 0,
-          origin: window.location.origin
+          rel: 0
         },
         events: {
           onReady: (event) => this.onPlayerReady(event),
@@ -77,25 +77,23 @@ class LovePlayer {
       this.player.setVolume(vol);
     } catch (e) {}
 
-    console.log("🌸 YouTube Audio Engine đã sẵn sàng!");
+    console.log("🌸 YouTube Audio Engine đã sẵn sàng trên thiết bị!");
 
-    // If there is already a track in room state
+    // If a track was queued before API became ready
     if (this.currentTrack) {
       this.loadTrack(this.currentTrack, this.isPlaying, 0);
     }
   }
 
   onPlayerStateChange(event) {
-    // YT.PlayerState: ENDED (0), PLAYING (1), PAUSED (2), BUFFERING (3), CUED (5)
     if (this.isRemoteAction) return;
 
     if (event.data === YT.PlayerState.PLAYING) {
       this.isPlaying = true;
       this.updateUIVisuals(true);
-      // Ensure unmuted
-      if (this.player.isMuted()) {
-        this.player.unMute();
-      }
+      try {
+        if (this.player.isMuted()) this.player.unMute();
+      } catch (e) {}
 
       this.socket.emit('toggle_playback', {
         isPlaying: true,
@@ -109,16 +107,14 @@ class LovePlayer {
         currentTime: this.player.getCurrentTime()
       });
     } else if (event.data === YT.PlayerState.ENDED) {
-      // Song ended: request next track in shared queue
       this.socket.emit('next_track');
     }
   }
 
   onPlayerError(event) {
     console.warn("YouTube Player error:", event.data);
-    // Error 101 or 150: Video owner does not allow embedding
     if (event.data === 150 || event.data === 101 || event.data === 2) {
-      window.App?.showToast("⚠️ Bản này chặn nhúng web, đang tự động tìm bản thay thế cho bạn... 🌸");
+      window.App?.showToast("⚠️ Bản này chặn nhúng web, đang tự động tìm bản thay thế... 🌸");
       this.autoFallbackTrack();
     } else {
       setTimeout(() => {
@@ -136,6 +132,7 @@ class LovePlayer {
       const alt = data.results?.find(t => t.id !== this.currentTrack.id);
       if (alt) {
         window.App?.showToast(`🎶 Đã đổi sang: ${alt.title}`);
+        this.loadTrack(alt, true, 0);
         this.socket.emit('play_track', { track: alt });
       } else {
         this.socket.emit('next_track');
@@ -145,50 +142,57 @@ class LovePlayer {
     }
   }
 
+  // Persistent gesture unlocker that works seamlessly on mobile
   setupAudioAutoplayUnlock() {
-    // Unlock audio context on any user click
-    const unlock = () => {
-      if (this.player && this.isReady) {
-        try {
-          this.player.unMute();
-          const vol = this.elVolumeSlider ? parseInt(this.elVolumeSlider.value, 10) : 100;
-          this.player.setVolume(vol);
-          if (this.isPlaying && this.player.getPlayerState() !== YT.PlayerState.PLAYING) {
-            this.player.playVideo();
-          }
-        } catch (e) {}
-      }
-      document.getElementById('audio-unlock-banner')?.remove();
-      window.removeEventListener('click', unlock);
-      window.removeEventListener('keydown', unlock);
-      window.removeEventListener('touchstart', unlock);
+    const unlockHandler = () => {
+      this.unlockAudio();
     };
 
-    window.addEventListener('click', unlock);
-    window.addEventListener('keydown', unlock);
-    window.addEventListener('touchstart', unlock);
+    window.addEventListener('click', unlockHandler, { passive: true });
+    window.addEventListener('touchstart', unlockHandler, { passive: true });
+    window.addEventListener('touchend', unlockHandler, { passive: true });
+  }
+
+  unlockAudio() {
+    if (!this.player || !this.isReady) return;
+    try {
+      this.player.unMute();
+      const vol = this.elVolumeSlider ? parseInt(this.elVolumeSlider.value, 10) : 100;
+      this.player.setVolume(vol);
+      this.audioUnlocked = true;
+      document.getElementById('audio-unlock-banner')?.remove();
+    } catch (e) {}
   }
 
   initEventListeners() {
     // Play/Pause button
-    this.elPlayBtn?.addEventListener('click', () => {
+    const handlePlayToggle = (e) => {
+      e?.preventDefault();
+      this.unlockAudio();
+
       if (!this.currentTrack) {
         const defaultTrack = window.CURATED_PLAYLISTS?.vpop?.tracks?.[0];
         if (defaultTrack) {
+          this.loadTrack(defaultTrack, true, 0);
           this.socket.emit('play_track', { track: defaultTrack });
           return;
         }
       }
       this.togglePlay();
-    });
+    };
+
+    this.elPlayBtn?.addEventListener('click', handlePlayToggle);
+    this.elPlayBtn?.addEventListener('touchend', handlePlayToggle);
 
     // Next track button
     document.getElementById('btn-next')?.addEventListener('click', () => {
+      this.unlockAudio();
       this.socket.emit('next_track');
     });
 
     // Previous track button
     document.getElementById('btn-prev')?.addEventListener('click', () => {
+      this.unlockAudio();
       if (this.player && this.isReady) {
         this.socket.emit('seek_track', { time: 0 });
       }
@@ -203,6 +207,7 @@ class LovePlayer {
         const duration = this.player.getDuration() || 0;
         const targetTime = clickRatio * duration;
 
+        this.syncSeek(targetTime);
         this.socket.emit('seek_track', { time: targetTime });
       });
     }
@@ -219,8 +224,9 @@ class LovePlayer {
 
     // Instant Sync with Partner button
     document.getElementById('btn-instant-sync')?.addEventListener('click', () => {
+      this.unlockAudio();
       this.socket.emit('request_sync');
-      window.App?.showToast("⚡ Đã đồng bộ tức thì với người yêu!");
+      window.App?.showToast("⚡ Đã đồng bộ tức thì cùng người yêu!");
     });
 
     // View Mode Toggle (Vinyl Turntable vs Video MV)
@@ -235,12 +241,12 @@ class LovePlayer {
       this.elTurntableArea?.classList.add('hidden-view');
       this.elYtContainer?.classList.add('mv-expanded');
       if (this.elToggleViewBtn) this.elToggleViewBtn.innerHTML = '<span>🌸</span><span>Đĩa Than</span>';
-      window.App?.showToast("📺 Đã chuyển sang chế độ Xem MV & Lời bài hát!");
+      window.App?.showToast("📺 Đã mở màn hình MV & Lời bài hát!");
     } else {
       this.elTurntableArea?.classList.remove('hidden-view');
       this.elYtContainer?.classList.remove('mv-expanded');
       if (this.elToggleViewBtn) this.elToggleViewBtn.innerHTML = '<span>📺</span><span>Xem MV</span>';
-      window.App?.showToast("🌸 Đã chuyển sang chế độ Đĩa Than Lãng Mạn!");
+      window.App?.showToast("🌸 Đã chuyển sang đĩa than lãng mạn!");
     }
   }
 
@@ -256,12 +262,25 @@ class LovePlayer {
     const targetState = !this.isPlaying;
     const currentTime = this.player.getCurrentTime() || 0;
 
+    this.isPlaying = targetState;
+    this.updateUIVisuals(targetState);
+
+    try {
+      this.player.unMute();
+      if (targetState) {
+        this.player.playVideo();
+      } else {
+        this.player.pauseVideo();
+      }
+    } catch (e) {}
+
     this.socket.emit('toggle_playback', {
       isPlaying: targetState,
       currentTime
     });
   }
 
+  // Load and play track (called directly in click event for mobile gesture compatibility)
   loadTrack(track, autoPlay = true, startTime = 0) {
     this.currentTrack = track;
     this.updateTrackMetadataUI(track);
@@ -318,7 +337,12 @@ class LovePlayer {
       }
 
       if (isPlaying) {
-        this.player.playVideo();
+        const playPromise = this.player.playVideo();
+        if (playPromise !== undefined) {
+          playPromise.catch(e => {
+            console.warn("Mobile autoplay restriction:", e);
+          });
+        }
       } else {
         this.player.pauseVideo();
       }
