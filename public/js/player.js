@@ -1,4 +1,4 @@
-// Player & Real-time Playback Sync Controller (Optimized for Mobile iOS & Android)
+// Player & Real-time Playback Sync Controller (Optimized with Background Audio, MediaSession & Picture-in-Picture)
 
 class LovePlayer {
   constructor(socketClient) {
@@ -12,6 +12,18 @@ class LovePlayer {
     this.driftThreshold = 2.0;
     this.isMvMode = false;
     this.audioUnlocked = false;
+
+    // Background Audio Anchor (Keeps mobile OS audio session alive in background)
+    this.silentAudio = new Audio("data:audio/wav;base64,UklGRigAAABXQVZFZm10IBAAAAABAAEARKwAAIhYAQACABAAZGF0YQQAAAAAAA==");
+    this.silentAudio.loop = true;
+    this.silentAudio.volume = 0.001;
+
+    // PiP elements
+    this.pipVideo = null;
+    this.pipCanvas = null;
+    this.pipCtx = null;
+    this.pipAngle = 0;
+    this.pipActive = false;
 
     // DOM Elements
     this.elDisc = document.getElementById('vinyl-disc');
@@ -33,11 +45,13 @@ class LovePlayer {
     this.elTurntableArea = document.getElementById('turntable-area');
     this.elYtContainer = document.getElementById('yt-player-box');
     this.elToggleViewBtn = document.getElementById('btn-toggle-view');
+    this.elPipBtn = document.getElementById('btn-pip-mode');
 
     this.initEventListeners();
     this.initYouTubeAPI();
     this.startProgressTicker();
     this.setupAudioAutoplayUnlock();
+    this.setupVisibilityChange();
   }
 
   initYouTubeAPI() {
@@ -45,7 +59,7 @@ class LovePlayer {
       this.player = new YT.Player('yt-player-target', {
         height: '100%',
         width: '100%',
-        videoId: 'FN7ALfpGxiI', // Preload initial verified track
+        videoId: 'FN7ALfpGxiI',
         playerVars: {
           autoplay: 0,
           controls: 1,
@@ -79,7 +93,6 @@ class LovePlayer {
 
     console.log("🌸 YouTube Audio Engine đã sẵn sàng trên thiết bị!");
 
-    // If a track was queued before API became ready
     if (this.currentTrack) {
       this.loadTrack(this.currentTrack, this.isPlaying, 0);
     }
@@ -142,7 +155,6 @@ class LovePlayer {
     }
   }
 
-  // Persistent gesture unlocker that works seamlessly on mobile
   setupAudioAutoplayUnlock() {
     const unlockHandler = () => {
       this.unlockAudio();
@@ -162,6 +174,22 @@ class LovePlayer {
       this.audioUnlocked = true;
       document.getElementById('audio-unlock-banner')?.remove();
     } catch (e) {}
+  }
+
+  setupVisibilityChange() {
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') {
+        // Tab brought to foreground, re-align timestamp
+        this.socket.emit('request_sync');
+        if (this.isPlaying && this.player && this.isReady) {
+          try {
+            if (this.player.getPlayerState() !== YT.PlayerState.PLAYING) {
+              this.player.playVideo();
+            }
+          } catch (e) {}
+        }
+      }
+    });
   }
 
   initEventListeners() {
@@ -233,6 +261,11 @@ class LovePlayer {
     this.elToggleViewBtn?.addEventListener('click', () => {
       this.toggleViewMode();
     });
+
+    // Picture-in-Picture Mode Toggle (Floating window on top of Zalo/Messenger/Web)
+    this.elPipBtn?.addEventListener('click', () => {
+      this.togglePictureInPicture();
+    });
   }
 
   toggleViewMode() {
@@ -248,6 +281,126 @@ class LovePlayer {
       if (this.elToggleViewBtn) this.elToggleViewBtn.innerHTML = '<span>📺</span><span>Xem MV</span>';
       window.App?.showToast("🌸 Đã chuyển sang đĩa than lãng mạn!");
     }
+  }
+
+  // Picture-in-Picture Floating Window for multitasking
+  async togglePictureInPicture() {
+    this.unlockAudio();
+
+    if (!document.pictureInPictureEnabled) {
+      window.App?.showToast("Thiết bị này không hỗ trợ tính năng Cửa sổ nổi (PiP)");
+      return;
+    }
+
+    if (document.pictureInPictureElement) {
+      try {
+        await document.exitPictureInPicture();
+        this.pipActive = false;
+        window.App?.showToast("Đã đóng cửa sổ nổi.");
+      } catch (e) {}
+      return;
+    }
+
+    // Initialize PiP canvas and video if not already created
+    if (!this.pipVideo) {
+      this.pipCanvas = document.createElement('canvas');
+      this.pipCanvas.width = 480;
+      this.pipCanvas.height = 480;
+      this.pipCtx = this.pipCanvas.getContext('2d');
+
+      this.drawPipFrame();
+      const stream = this.pipCanvas.captureStream(15);
+      this.pipVideo = document.createElement('video');
+      this.pipVideo.srcObject = stream;
+      this.pipVideo.muted = true;
+      this.pipVideo.playsInline = true;
+
+      this.pipVideo.addEventListener('leavepictureinpicture', () => {
+        this.pipActive = false;
+      });
+    }
+
+    try {
+      await this.pipVideo.play();
+      await this.pipVideo.requestPictureInPicture();
+      this.pipActive = true;
+      this.startPipRenderLoop();
+      window.App?.showToast("🪟 Đã mở Cửa Sổ Nổi! Bạn có thể thoát web lướt Zalo/Facebook mà nhạc vẫn chạy 💕");
+    } catch (err) {
+      console.warn("PiP activation error:", err);
+      window.App?.showToast("Không thể mở cửa sổ nổi trên trình duyệt này.");
+    }
+  }
+
+  drawPipFrame() {
+    if (!this.pipCtx || !this.pipCanvas) return;
+    const ctx = this.pipCtx;
+    const w = this.pipCanvas.width;
+    const h = this.pipCanvas.height;
+
+    // Background gradient
+    const grad = ctx.createLinearGradient(0, 0, w, h);
+    grad.addColorStop(0, '#ff99ac');
+    grad.addColorStop(1, '#ff3360');
+    ctx.fillStyle = grad;
+    ctx.fillRect(0, 0, w, h);
+
+    // Draw vinyl record
+    ctx.save();
+    ctx.translate(w / 2, h / 2 - 30);
+    ctx.rotate((this.pipAngle * Math.PI) / 180);
+
+    // Black vinyl disc
+    ctx.beginPath();
+    ctx.arc(0, 0, 150, 0, Math.PI * 2);
+    ctx.fillStyle = '#1a1416';
+    ctx.fill();
+
+    // Grooves
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
+    ctx.lineWidth = 2;
+    for (let r = 70; r < 145; r += 12) {
+      ctx.beginPath();
+      ctx.arc(0, 0, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    // Center label
+    ctx.beginPath();
+    ctx.arc(0, 0, 55, 0, Math.PI * 2);
+    ctx.fillStyle = '#ff5277';
+    ctx.fill();
+
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 22px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText('♥', 0, 0);
+
+    ctx.restore();
+
+    // Titles at bottom
+    ctx.fillStyle = 'white';
+    ctx.font = 'bold 24px sans-serif';
+    ctx.textAlign = 'center';
+    const title = this.currentTrack ? this.currentTrack.title : 'Thịnh & Thảo Như 💕';
+    ctx.fillText(title.substring(0, 24), w / 2, h - 60);
+
+    ctx.font = '16px sans-serif';
+    ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+    ctx.fillText('Thịnh & Thảo Như • LoveTunes', w / 2, h - 28);
+  }
+
+  startPipRenderLoop() {
+    const loop = () => {
+      if (!this.pipActive) return;
+      if (this.isPlaying) {
+        this.pipAngle = (this.pipAngle + 1.5) % 360;
+      }
+      this.drawPipFrame();
+      requestAnimationFrame(loop);
+    };
+    requestAnimationFrame(loop);
   }
 
   updateVolumeIcon(vol) {
@@ -280,7 +433,6 @@ class LovePlayer {
     });
   }
 
-  // Load and play track (called directly in click event for mobile gesture compatibility)
   loadTrack(track, autoPlay = true, startTime = 0) {
     this.currentTrack = track;
     this.updateTrackMetadataUI(track);
@@ -378,6 +530,44 @@ class LovePlayer {
         this.elSourceTag.innerHTML = `<span>▶️</span> YouTube Audio`;
       }
     }
+
+    // Update MediaSession on Lock Screen & Bluetooth
+    this.updateMediaSession(track);
+  }
+
+  updateMediaSession(track) {
+    if (!('mediaSession' in navigator) || !track) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: track.title,
+        artist: `${track.artist} • Thịnh & Thảo Như 💕`,
+        album: 'LoveTunes - Phòng Nghe Nhạc Đôi',
+        artwork: [
+          { src: track.thumbnail || 'https://i.ytimg.com/vi/FN7ALfpGxiI/hqdefault.jpg', sizes: '512x512', type: 'image/jpeg' }
+        ]
+      });
+
+      navigator.mediaSession.setActionHandler('play', () => {
+        this.togglePlay();
+      });
+      navigator.mediaSession.setActionHandler('pause', () => {
+        this.togglePlay();
+      });
+      navigator.mediaSession.setActionHandler('previoustrack', () => {
+        this.socket.emit('seek_track', { time: 0 });
+      });
+      navigator.mediaSession.setActionHandler('nexttrack', () => {
+        this.socket.emit('next_track');
+      });
+      navigator.mediaSession.setActionHandler('seekto', (details) => {
+        if (details.seekTime !== undefined) {
+          this.syncSeek(details.seekTime);
+          this.socket.emit('seek_track', { time: details.seekTime });
+        }
+      });
+    } catch (e) {
+      console.warn("MediaSession update error:", e);
+    }
   }
 
   updateUIVisuals(playing) {
@@ -386,11 +576,22 @@ class LovePlayer {
       this.elTonearm?.classList.add('active');
       this.elWaveBars?.forEach(b => b.classList.add('playing'));
       if (this.elPlayIcon) this.elPlayIcon.textContent = '⏸';
+
+      // Keep background audio anchor alive for mobile OS
+      this.silentAudio.play().catch(() => {});
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'playing';
+      }
     } else {
       this.elDisc?.classList.remove('spinning');
       this.elTonearm?.classList.remove('active');
       this.elWaveBars?.forEach(b => b.classList.remove('playing'));
       if (this.elPlayIcon) this.elPlayIcon.textContent = '▶';
+
+      this.silentAudio.pause();
+      if ('mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'paused';
+      }
     }
   }
 

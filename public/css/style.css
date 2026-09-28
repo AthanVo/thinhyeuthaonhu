@@ -407,9 +407,29 @@ body {
   flex: 1;
 }
 
-.btn-toggle-view {
+.player-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   flex-shrink: 0;
-  padding: 6px 14px;
+}
+
+.btn-pip-mode {
+  padding: 6px 12px;
+  font-size: 12px;
+  background: #fff0f3;
+  border-color: #ffccd5;
+  color: #ff3360;
+}
+
+.btn-pip-mode:hover {
+  background: #ffe3e8;
+  border-color: #ff5277;
+  color: #d90429;
+}
+
+.btn-toggle-view {
+  padding: 6px 12px;
   font-size: 12px;
 }
 
