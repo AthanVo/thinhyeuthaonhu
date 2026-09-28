@@ -388,9 +388,9 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Live Chat
-  socket.on('send_chat', ({ message }) => {
-    if (!currentRoomId || !message || !message.trim()) return;
+  // Live Chat with Sticker support
+  socket.on('send_chat', ({ message, sticker }) => {
+    if (!currentRoomId || (!message?.trim() && !sticker)) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
@@ -399,7 +399,8 @@ io.on('connection', (socket) => {
       senderId: socket.id,
       sender: currentUser?.nickname || 'Người Thương',
       avatar: currentUser?.avatar || '💖',
-      text: message.trim(),
+      text: message ? message.trim() : '',
+      sticker: sticker || null,
       timestamp: Date.now()
     };
 

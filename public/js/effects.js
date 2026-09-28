@@ -81,7 +81,7 @@ class HeartCanvasEffects {
       this.ctx.globalAlpha = Math.max(0, p.opacity);
       this.ctx.translate(p.x, p.y);
       this.ctx.rotate((p.rotation * Math.PI) / 180);
-      this.ctx.font = `${p.size}px sans-serif`;
+      this.ctx.font = `${p.size}px "Apple Color Emoji", "Segoe UI Emoji", "Noto Color Emoji", sans-serif`;
       this.ctx.textAlign = 'center';
       this.ctx.textBaseline = 'middle';
       this.ctx.fillText(p.emoji, 0, 0);

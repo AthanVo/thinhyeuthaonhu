@@ -336,6 +336,61 @@ class LoveTunesApp {
         btn.classList.add('selected');
       });
     });
+
+    // Sticker Drawer Toggle & Categories
+    const stickerPanel = document.getElementById('sticker-tray-panel');
+    document.getElementById('btn-toggle-stickers')?.addEventListener('click', () => {
+      stickerPanel?.classList.toggle('active');
+      if (stickerPanel?.classList.contains('active')) {
+        this.renderStickerGrid('cats');
+      }
+    });
+
+    document.getElementById('btn-close-stickers')?.addEventListener('click', () => {
+      stickerPanel?.classList.remove('active');
+    });
+
+    document.querySelectorAll('.sticker-cat-btn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        document.querySelectorAll('.sticker-cat-btn').forEach(b => b.classList.remove('active'));
+        btn.classList.add('active');
+        const cat = btn.getAttribute('data-cat') || 'cats';
+        this.renderStickerGrid(cat);
+      });
+    });
+
+    // Close stickers when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('#sticker-tray-panel') && !e.target.closest('#btn-toggle-stickers')) {
+        stickerPanel?.classList.remove('active');
+      }
+    });
+  }
+
+  renderStickerGrid(catKey) {
+    const grid = document.getElementById('sticker-grid');
+    if (!grid || !window.STICKER_COLLECTIONS) return;
+
+    const collection = window.STICKER_COLLECTIONS[catKey] || window.STICKER_COLLECTIONS.cats;
+    grid.innerHTML = '';
+
+    collection.stickers.forEach(sticker => {
+      const btn = document.createElement('button');
+      btn.className = 'sticker-item-btn';
+      btn.title = sticker.text || sticker.name;
+      btn.innerHTML = `
+        <span class="sticker-emoji-icon">${sticker.emoji}</span>
+        <span class="sticker-name-label">${sticker.name}</span>
+      `;
+
+      btn.addEventListener('click', () => {
+        this.socket.emit('send_chat', { message: '', sticker });
+        this.effects.burst(sticker.emoji, 15);
+        document.getElementById('sticker-tray-panel')?.classList.remove('active');
+      });
+
+      grid.appendChild(btn);
+    });
   }
 
   // Curated Playlists Render
@@ -592,15 +647,32 @@ class LoveTunesApp {
       bubble.className = `chat-bubble ${isMine ? 'mine' : 'partner'}`;
       const timeStr = new Date(msg.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 
+      let stickerHtml = '';
+      if (msg.sticker) {
+        stickerHtml = `
+          <div class="chat-sticker-card" style="background: ${msg.sticker.bg || 'white'};">
+            <span class="chat-sticker-emoji">${msg.sticker.emoji}</span>
+            <span class="chat-sticker-text">${msg.sticker.text || msg.sticker.name}</span>
+          </div>
+        `;
+      }
+
       bubble.innerHTML = `
         <div class="chat-sender-name">${msg.avatar || ''} ${msg.sender}</div>
-        <div>${msg.text}</div>
+        ${msg.text ? `<div>${msg.text}</div>` : ''}
+        ${stickerHtml}
         <div class="chat-time">${timeStr}</div>
       `;
     }
 
     this.elChatHistory.appendChild(bubble);
-    if (autoScroll) this.scrollChatToBottom();
+    if (autoScroll) {
+      this.scrollChatToBottom();
+      // If sticker received from partner, trigger particle burst across screen!
+      if (!isMine && msg.sticker?.emoji) {
+        this.effects.burst(msg.sticker.emoji, 14);
+      }
+    }
   }
 
   scrollChatToBottom() {

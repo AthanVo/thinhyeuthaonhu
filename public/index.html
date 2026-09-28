@@ -6,10 +6,10 @@
   <title>Thịnh & Thảo Như 💕 - Phòng Nghe Nhạc Đôi Lãng Mạn</title>
   <meta name="description" content="Phòng nghe nhạc đôi lãng mạn dành riêng cho Thịnh và Thảo Như.">
   
-  <!-- Google Fonts -->
+  <!-- Google Fonts: Be Vietnam Pro + Outfit + Dancing Script -->
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Dancing+Script:wght@600;700&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:ital,wght@0,300;0,400;0,500;0,600;0,700;0,800;1,400&family=Dancing+Script:wght@600;700&family=Outfit:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
   <!-- Main CSS -->
   <link rel="stylesheet" href="css/style.css">
@@ -167,13 +167,15 @@
         </div>
 
         <!-- Love Reactions Bar -->
+        <!-- Love Reactions Bar with Rhino & Cat -->
         <div class="love-reactions-panel">
+          <button class="reaction-btn" data-emoji="🦏" title="Tê giác phóng tim">🦏</button>
+          <button class="reaction-btn" data-emoji="🐱" title="Mèo cưng">🐱</button>
           <button class="reaction-btn" data-emoji="💖" title="Thả tim">💖</button>
           <button class="reaction-btn" data-emoji="🌸" title="Gửi hoa">🌸</button>
           <button class="reaction-btn" data-emoji="🥰" title="Thương yêu">🥰</button>
           <button class="reaction-btn" data-emoji="✨" title="Lấp lánh">✨</button>
           <button class="reaction-btn" data-emoji="🍓" title="Dâu tây">🍓</button>
-          <button class="reaction-btn" data-emoji="💌" title="Thư tình">💌</button>
           <button class="btn-burst-hearts" id="btn-burst-hearts" title="Bắn cơn mưa tim qua màn hình người yêu">
             <span>💖 Bão Tim</span>
           </button>
@@ -268,9 +270,28 @@
                 <button class="btn-sweet-chip" data-text="Thịnh yêu Thảo Như nhất trên đời! ✨">Yêu Như nhất ✨</button>
               </div>
 
-              <!-- Input bar -->
+              <!-- Cute Sticker Tray (Rhinos & Cats) -->
+              <div class="sticker-tray-panel" id="sticker-tray-panel">
+                <div class="sticker-tray-header">
+                  <span class="sticker-tray-title">Bộ Sticker Tê Giác &amp; Mèo Cute 🌸</span>
+                  <button class="btn-close-stickers" id="btn-close-stickers" title="Đóng">✕</button>
+                </div>
+                <div class="sticker-category-tabs">
+                  <button class="sticker-cat-btn active" data-cat="cats">🐱 Mèo Cute</button>
+                  <button class="sticker-cat-btn" data-cat="rhinos">🦏 Tê Giác</button>
+                  <button class="sticker-cat-btn" data-cat="love">💖 Đôi Lứa</button>
+                </div>
+                <div class="sticker-grid" id="sticker-grid">
+                  <!-- Populated dynamically from stickers.js -->
+                </div>
+              </div>
+
+              <!-- Input bar with Sticker button -->
               <div class="chat-input-bar">
-                <input type="text" class="custom-input" id="chat-message-input" placeholder="Nhắn lời ngọt ngào gửi người yêu...">
+                <button class="btn-sticker-toggle" id="btn-toggle-stickers" title="Mở bộ Sticker Tê Giác &amp; Mèo Cưng">
+                  <span>🐱🦏</span>
+                </button>
+                <input type="text" class="custom-input" id="chat-message-input" placeholder="Nhắn lời ngọt ngào hoặc gửi sticker...">
                 <button class="btn-chat-send" id="btn-send-chat" title="Gửi tin nhắn">💌</button>
               </div>
             </div>
@@ -289,18 +310,19 @@
 
       <div class="form-group">
         <label class="form-label" for="profile-name-input">Biệt danh của bạn:</label>
-        <input type="text" class="custom-input" id="profile-name-input" placeholder="Ví dụ: Anh Yêu, Bé Điệu, v.v.">
+        <input type="text" class="custom-input" id="profile-name-input" placeholder="Ví dụ: Anh Thịnh, Bé Thảo Như, v.v.">
       </div>
 
       <div class="form-group">
         <label class="form-label">Chọn biểu tượng dễ thương:</label>
         <div class="avatar-selector-row">
-          <button class="avatar-option-btn" data-avatar="🌸">🌸</button>
-          <button class="avatar-option-btn" data-avatar="💖">💖</button>
-          <button class="avatar-option-btn" data-avatar="🐰">🐰</button>
-          <button class="avatar-option-btn" data-avatar="🐱">🐱</button>
-          <button class="avatar-option-btn" data-avatar="🍓">🍓</button>
-          <button class="avatar-option-btn" data-avatar="✨">✨</button>
+          <button class="avatar-option-btn" data-avatar="🦏" title="Tê Giác">🦏</button>
+          <button class="avatar-option-btn" data-avatar="🐱" title="Mèo Cưng">🐱</button>
+          <button class="avatar-option-btn" data-avatar="🌸" title="Hoa Anh Đào">🌸</button>
+          <button class="avatar-option-btn" data-avatar="💖" title="Trái Tim">💖</button>
+          <button class="avatar-option-btn" data-avatar="👑" title="Vương Miện">👑</button>
+          <button class="avatar-option-btn" data-avatar="🐾" title="Dấu Chân Mèo">🐾</button>
+          <button class="avatar-option-btn" data-avatar="🍓" title="Dâu Tây">🍓</button>
         </div>
       </div>
 
@@ -317,6 +339,7 @@
   <!-- Scripts -->
   <script src="/socket.io/socket.io.js"></script>
   <script src="https://www.youtube.com/iframe_api"></script>
+  <script src="js/stickers.js"></script>
   <script src="js/playlists.js"></script>
   <script src="js/effects.js"></script>
   <script src="js/player.js"></script>
