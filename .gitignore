@@ -1,5 +1,5 @@
 node_modules/
-cloudflared.exe
-*.log
-.DS_Store
+discord-bot/node_modules/
 .env
+discord-bot/.env
+.DS_Store

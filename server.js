@@ -26,7 +26,13 @@ const DEFAULT_ROOM_ID = 'THINH-NHU';
 const searchCache = new Map();     // key -> { data, expiresAt }
 const suggestionCache = new Map(); // key -> { data, expiresAt }
 const resolveCache = new Map();    // url -> { data, expiresAt }
+const streamCache = new Map();     // videoId -> { data, expiresAt }
+const lyricsCache = new Map();     // query -> { data, expiresAt }
 const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+const STREAM_TTL_MS = 20 * 60 * 1000; // 20 minutes for googlevideo URLs
+
+let cachedVisitorData = '';
+let visitorDataExpiresAt = 0;
 
 function getCache(map, key) {
   const item = map.get(key);
@@ -38,12 +44,151 @@ function getCache(map, key) {
   return item.data;
 }
 
-function setCache(map, key, data, maxEntries = 500) {
+function setCache(map, key, data, maxEntries = 500, ttlMs = CACHE_TTL_MS) {
   if (map.size >= maxEntries) {
     const firstKey = map.keys().next().value;
     map.delete(firstKey);
   }
-  map.set(key, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+  map.set(key, { data, expiresAt: Date.now() + ttlMs });
+}
+
+async function getYouTubeVisitorData() {
+  if (cachedVisitorData && Date.now() < visitorDataExpiresAt) {
+    return cachedVisitorData;
+  }
+  try {
+    const res = await fetch('https://www.youtube.com/sw.js_data', {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    const text = await res.text();
+    const match = text.match(/Cgt[a-zA-Z0-9_-]+%3D%3D|Cgt[a-zA-Z0-9_%-]+/);
+    if (match) {
+      cachedVisitorData = decodeURIComponent(match[0]);
+      visitorDataExpiresAt = Date.now() + 30 * 60 * 1000;
+    }
+  } catch (e) {}
+  return cachedVisitorData;
+}
+
+// Direct High-Speed YouTube Audio Stream Extractor (Opus 251 & M4A 140 via ANDROID_VR / IOS Innertube)
+async function extractYouTubeAudioStream(videoId) {
+  const cleanId = (videoId || '').trim();
+  if (!cleanId) return null;
+
+  const cached = getCache(streamCache, cleanId);
+  if (cached) return cached;
+
+  try {
+    const visitorData = await getYouTubeVisitorData();
+    const vrUserAgent = 'com.google.android.apps.youtube.vr.oculus/1.65.10 (Linux; U; Android 12L; eureka-user Build/SQ3A.220605.009.A1) gzip';
+
+    const res = await fetch('https://www.youtube.com/youtubei/v1/player?prettyPrint=false', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'User-Agent': vrUserAgent,
+        'X-YouTube-Client-Name': '28',
+        'X-YouTube-Client-Version': '1.65.10',
+        ...(visitorData ? { 'X-Goog-Visitor-Id': visitorData } : {})
+      },
+      body: JSON.stringify({
+        videoId: cleanId,
+        context: {
+          client: {
+            clientName: 'ANDROID_VR',
+            clientVersion: '1.65.10',
+            deviceMake: 'Oculus',
+            deviceModel: 'Quest 3',
+            androidSdkVersion: 32,
+            userAgent: vrUserAgent,
+            osName: 'Android',
+            osVersion: '12L',
+            hl: 'vi',
+            gl: 'VN',
+            ...(visitorData ? { visitorData } : {})
+          }
+        },
+        contentCheckOk: true,
+        racyCheckOk: true
+      })
+    });
+
+    const data = await res.json();
+    const formats = [
+      ...(data.streamingData?.adaptiveFormats || []),
+      ...(data.streamingData?.formats || [])
+    ];
+    const audioFormats = formats
+      .filter(f => f.mimeType?.startsWith('audio/') && f.url)
+      .sort((a, b) => (b.bitrate || 0) - (a.bitrate || 0));
+
+    if (audioFormats.length === 0) return null;
+
+    const opusFormat = audioFormats.find(f => f.itag === 251) || audioFormats.find(f => f.mimeType?.includes('opus'));
+    const m4aFormat = audioFormats.find(f => f.itag === 140) || audioFormats.find(f => f.mimeType?.includes('mp4'));
+    const bestFormat = opusFormat || m4aFormat || audioFormats[0];
+
+    const details = data.videoDetails || {};
+    const durationSec = parseInt(details.lengthSeconds, 10) || 0;
+    const mins = Math.floor(durationSec / 60);
+    const secs = String(durationSec % 60).padStart(2, '0');
+
+    const streamInfo = {
+      id: cleanId,
+      title: details.title || 'YouTube Audio',
+      artist: details.author || 'YouTube',
+      durationSeconds: durationSec,
+      duration: durationSec > 0 ? `${mins}:${secs}` : 'LIVE',
+      views: details.viewCount ? Number(details.viewCount).toLocaleString('vi-VN') + ' lượt xem' : '',
+      thumbnail: details.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${cleanId}/hqdefault.jpg`,
+      url: `https://www.youtube.com/watch?v=${cleanId}`,
+      bestAudioUrl: bestFormat.url,
+      mimeType: bestFormat.mimeType,
+      bitrate: bestFormat.bitrate || 128000,
+      opusUrl: opusFormat?.url || null,
+      m4aUrl: m4aFormat?.url || null
+    };
+
+    setCache(streamCache, cleanId, streamInfo, 300, STREAM_TTL_MS);
+    return streamInfo;
+  } catch (err) {
+    console.error('extractYouTubeAudioStream error:', err.message);
+    return null;
+  }
+}
+
+// Lyrics Search via LRCLIB (Free, Fast, Synced & Plain Lyrics)
+async function searchLyrics(query) {
+  const cleanQuery = (query || '').replace(/\(.*?\)|\[.*?\]|Official.*?MV|Official.*?Audio|Lyrics|Video|MV|HD|4K/gi, '').trim();
+  if (!cleanQuery) return null;
+
+  const cacheKey = cleanQuery.toLowerCase();
+  const cached = getCache(lyricsCache, cacheKey);
+  if (cached) return cached;
+
+  try {
+    const res = await fetch(`https://lrclib.net/api/search?q=${encodeURIComponent(cleanQuery)}`, {
+      headers: { 'User-Agent': 'LoveTunes-CoupleRoom/2.0 (https://thinhyeuthaonhu.onrender.com)' }
+    });
+    if (!res.ok) return null;
+    const items = await res.json();
+    if (!Array.isArray(items) || items.length === 0) return null;
+
+    const best = items.find(i => i.plainLyrics || i.syncedLyrics) || items[0];
+    const result = {
+      trackName: best.trackName || cleanQuery,
+      artistName: best.artistName || '',
+      albumName: best.albumName || '',
+      plainLyrics: best.plainLyrics || '',
+      syncedLyrics: best.syncedLyrics || ''
+    };
+    setCache(lyricsCache, cacheKey, result);
+    return result;
+  } catch (err) {
+    return null;
+  }
 }
 
 function parseDurationToSeconds(durationStr) {
@@ -283,10 +428,10 @@ async function resolveMediaUrl(rawUrl) {
       return result;
     }
 
-    // B. Check if pure YouTube Playlist URL
+    // B. Check if YouTube Playlist / Album URL (including watch?v=...&list=PL...)
     const listMatch = url.match(/[?&]list=([^&#]+)/);
     const hasVideoParam = url.match(/[?&]v=([^&#]+)/) || url.match(/youtu\.be\/([^?&#]+)/);
-    if (listMatch && !hasVideoParam) {
+    if (listMatch && (!hasVideoParam || /^(PL|OLAK|UU|FL)/i.test(listMatch[1]))) {
       const tracks = await resolveYouTubePlaylist(listMatch[1], 25);
       if (tracks.length > 0) {
         const result = { track: tracks[0], tracks, isPlaylist: true };
@@ -598,6 +743,53 @@ app.post('/api/bot/room/:roomId?/action', async (req, res) => {
     currentTrack: room.currentTrack,
     isPlaying: room.isPlaying,
     currentTime: Math.round(calculateCurrentTime(room))
+  });
+});
+
+// 6. Direct YouTube Audio Stream Extractor for Discord Bot & Fallback Player
+app.get('/api/bot/stream', async (req, res) => {
+  const rawId = (req.query.id || req.query.q || '').trim();
+  if (!rawId) {
+    return res.status(400).json({ ok: false, error: 'Missing ?id= or ?q=' });
+  }
+
+  let videoId = rawId;
+  // Extract videoId if a full URL was passed
+  const matchWatch = rawId.match(/[?&]v=([^&#]+)/) || rawId.match(/youtu\.be\/([^?&#]+)/) || rawId.match(/shorts\/([^?&#]+)/);
+  if (matchWatch) {
+    videoId = matchWatch[1];
+  } else if (!/^[a-zA-Z0-9_-]{11}$/.test(rawId)) {
+    const searchRes = await searchYouTube(rawId, 1);
+    if (!searchRes[0]) {
+      return res.status(404).json({ ok: false, error: 'Video not found' });
+    }
+    videoId = searchRes[0].id;
+  }
+
+  const streamInfo = await extractYouTubeAudioStream(videoId);
+  if (!streamInfo) {
+    return res.status(404).json({ ok: false, error: 'Could not extract direct stream' });
+  }
+
+  res.json({
+    ok: true,
+    ...streamInfo
+  });
+});
+
+// 7. Lyrics Search Endpoint for Discord Bot (/lyrics) & Web Room
+app.get('/api/bot/lyrics', async (req, res) => {
+  const query = (req.query.q || '').trim();
+  if (!query) {
+    return res.status(400).json({ ok: false, error: 'Missing ?q=' });
+  }
+  const lyrics = await searchLyrics(query);
+  if (!lyrics || (!lyrics.plainLyrics && !lyrics.syncedLyrics)) {
+    return res.status(404).json({ ok: false, error: 'Không tìm thấy lời bài hát này' });
+  }
+  res.json({
+    ok: true,
+    ...lyrics
   });
 });
 
@@ -1062,4 +1254,14 @@ const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🌸 LoveTunes Server đang chạy tại: http://localhost:${PORT}`);
   console.log(`🎧 Sẵn sàng kết nối phòng nghe đôi & API cho Discord Bot!`);
+
+  // Auto-start Discord Bot in the same process if DISCORD_TOKEN is provided
+  if (process.env.DISCORD_TOKEN) {
+    try {
+      const { startDiscordBot } = require('./discord-bot/bot.js');
+      startDiscordBot();
+    } catch (err) {
+      console.warn('⚠️ Không thể tự khởi động Discord Bot cùng server:', err.message);
+    }
+  }
 });
