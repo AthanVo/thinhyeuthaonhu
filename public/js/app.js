@@ -31,11 +31,14 @@ class LoveTunesApp {
     this.elMyAvatar = document.getElementById('my-avatar-bubble');
     this.elPartnerAvatar = document.getElementById('partner-avatar-bubble');
     this.elSearchInput = document.getElementById('search-query-input');
+    this.elSearchSuggestions = document.getElementById('search-suggestions-box');
     this.elSearchResults = document.getElementById('search-results-list');
     this.elUrlInput = document.getElementById('direct-url-input');
     this.elResolveUrlBtn = document.getElementById('btn-resolve-url');
     this.elQueueContainer = document.getElementById('queue-items-container');
     this.elQueueBadge = document.getElementById('queue-count-badge');
+    this.elAutoRadioBtn = document.getElementById('btn-toggle-autoradio');
+    this.autoRadio = true;
     this.elChatHistory = document.getElementById('chat-history-box');
     this.elChatInput = document.getElementById('chat-message-input');
     this.elChatSendBtn = document.getElementById('btn-send-chat');
@@ -238,6 +241,15 @@ class LoveTunesApp {
       if (state.currentTrack) {
         this.player.applyRoomState(state.currentTrack, state.isPlaying, state.currentTime);
       }
+
+      if (state.autoRadio !== undefined) {
+        this.updateAutoRadioUI(state.autoRadio);
+      }
+    });
+
+    this.socket.on('autoradio_updated', ({ autoRadio, triggeredBy }) => {
+      this.updateAutoRadioUI(autoRadio);
+      this.showToast(`📻 ${triggeredBy} đã ${autoRadio ? 'BẬT' : 'TẮT'} tự động phát nhạc liên quan!`);
     });
 
     this.socket.on('user_joined', ({ user, users }) => {
@@ -388,16 +400,44 @@ class LoveTunesApp {
       this.showToast("💖 Đã gửi cơn mưa tim đến người yêu!");
     });
 
-    // YouTube Search
+    // YouTube Search & Instant Suggestions
     let searchTimer = null;
+    let suggestTimer = null;
     this.elSearchInput?.addEventListener('input', (e) => {
       clearTimeout(searchTimer);
+      clearTimeout(suggestTimer);
       const query = e.target.value.trim();
       if (!query) {
         if (this.elSearchResults) this.elSearchResults.innerHTML = '';
+        this.hideSearchSuggestions();
         return;
       }
-      searchTimer = setTimeout(() => this.searchMusic(query), 400);
+      suggestTimer = setTimeout(() => this.fetchSearchSuggestions(query), 150);
+      searchTimer = setTimeout(() => this.searchMusic(query), 350);
+    });
+
+    this.elSearchInput?.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        clearTimeout(searchTimer);
+        this.hideSearchSuggestions();
+        const query = this.elSearchInput.value.trim();
+        if (query) this.searchMusic(query);
+      } else if (e.key === 'Escape') {
+        this.hideSearchSuggestions();
+      }
+    });
+
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.search-input-box')) {
+        this.hideSearchSuggestions();
+      }
+    });
+
+    // Auto-Radio Toggle
+    this.elAutoRadioBtn?.addEventListener('click', () => {
+      const nextState = !this.autoRadio;
+      this.updateAutoRadioUI(nextState);
+      this.socket.emit('toggle_autoradio', { enabled: nextState });
     });
 
     // URL Resolver (Spotify & YouTube)
@@ -626,6 +666,55 @@ class LoveTunesApp {
     document.body.appendChild(prompt);
   }
 
+  updateAutoRadioUI(enabled) {
+    this.autoRadio = Boolean(enabled);
+    if (!this.elAutoRadioBtn) return;
+    if (this.autoRadio) {
+      this.elAutoRadioBtn.classList.add('active');
+      this.elAutoRadioBtn.innerHTML = `<span>📻 Tự phát tiếp: BẬT</span>`;
+    } else {
+      this.elAutoRadioBtn.classList.remove('active');
+      this.elAutoRadioBtn.innerHTML = `<span>📻 Tự phát tiếp: TẮT</span>`;
+    }
+  }
+
+  hideSearchSuggestions() {
+    if (this.elSearchSuggestions) {
+      this.elSearchSuggestions.classList.remove('active');
+      this.elSearchSuggestions.innerHTML = '';
+    }
+  }
+
+  async fetchSearchSuggestions(query) {
+    if (!this.elSearchSuggestions || /^https?:\/\//i.test(query)) {
+      this.hideSearchSuggestions();
+      return;
+    }
+    try {
+      const res = await fetch(`/api/suggestions?q=${encodeURIComponent(query)}`);
+      const data = await res.json();
+      if (!data.suggestions || data.suggestions.length === 0) {
+        this.hideSearchSuggestions();
+        return;
+      }
+      this.elSearchSuggestions.innerHTML = '';
+      data.suggestions.slice(0, 6).forEach(text => {
+        const item = document.createElement('div');
+        item.className = 'suggestion-item';
+        item.innerHTML = `<span>🔍</span> <span>${text}</span>`;
+        item.addEventListener('click', () => {
+          if (this.elSearchInput) this.elSearchInput.value = text;
+          this.hideSearchSuggestions();
+          this.searchMusic(text);
+        });
+        this.elSearchSuggestions.appendChild(item);
+      });
+      this.elSearchSuggestions.classList.add('active');
+    } catch (e) {
+      this.hideSearchSuggestions();
+    }
+  }
+
   // YouTube Search
   async searchMusic(query) {
     if (!this.elSearchResults) return;
@@ -662,11 +751,11 @@ class LoveTunesApp {
     }
   }
 
-  // Spotify / YouTube URL Resolver
+  // Spotify / YouTube / Playlist URL Resolver
   async resolveDirectUrl() {
     const url = this.elUrlInput?.value.trim();
     if (!url) {
-      this.showToast("Vui lòng dán link YouTube, Spotify hoặc MP3!");
+      this.showToast("Vui lòng dán link YouTube, Playlist, Spotify hoặc MP3!");
       return;
     }
 
@@ -682,7 +771,13 @@ class LoveTunesApp {
       });
       const data = await res.json();
 
-      if (res.ok && data.track) {
+      if (res.ok && data.isPlaylist && data.tracks?.length > 0) {
+        this.player.unlockAudio();
+        this.socket.emit('add_to_queue', { tracks: data.tracks });
+        this.elUrlInput.value = '';
+        this.showToast(`✨ Đã thêm trọn bộ ${data.tracks.length} bài hát từ Playlist!`);
+        this.effects.burst('🌸', 15);
+      } else if (res.ok && data.track) {
         this.player.unlockAudio();
         this.socket.emit('add_to_queue', { track: data.track });
         this.elUrlInput.value = '';

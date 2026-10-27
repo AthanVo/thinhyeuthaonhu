@@ -22,6 +22,39 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const DEFAULT_ROOM_ID = 'THINH-NHU';
 
+// ----------------- In-Memory LRU Cache for Fast API -----------------
+const searchCache = new Map();     // key -> { data, expiresAt }
+const suggestionCache = new Map(); // key -> { data, expiresAt }
+const resolveCache = new Map();    // url -> { data, expiresAt }
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+function getCache(map, key) {
+  const item = map.get(key);
+  if (!item) return null;
+  if (Date.now() > item.expiresAt) {
+    map.delete(key);
+    return null;
+  }
+  return item.data;
+}
+
+function setCache(map, key, data, maxEntries = 500) {
+  if (map.size >= maxEntries) {
+    const firstKey = map.keys().next().value;
+    map.delete(firstKey);
+  }
+  map.set(key, { data, expiresAt: Date.now() + CACHE_TTL_MS });
+}
+
+function parseDurationToSeconds(durationStr) {
+  if (!durationStr || typeof durationStr !== 'string') return 0;
+  const parts = durationStr.split(':').map(Number);
+  if (parts.some(isNaN)) return 0;
+  if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+  if (parts.length === 2) return parts[0] * 60 + parts[1];
+  return parts[0] || 0;
+}
+
 // Store active rooms in-memory
 const rooms = new Map();
 // Grace-period timers for mobile app-switching / quick page refreshes
@@ -37,8 +70,10 @@ function getOrCreateRoom(roomId) {
       currentTime: 0,
       lastUpdate: Date.now(),
       lastTrackEndAt: 0,
+      autoRadio: true,
+      historyIds: [],
       queue: [],
-      users: new Map(), // key: socket.id -> user object
+      users: new Map(),
       chatMessages: [],
       createdAt: Date.now()
     });
@@ -55,20 +90,31 @@ function calculateCurrentTime(room) {
   return (room.currentTime || 0) + elapsedSec;
 }
 
-// ----------------- API Endpoints -----------------
+function rememberTrackHistory(room, trackId) {
+  if (!trackId) return;
+  room.historyIds = room.historyIds || [];
+  if (!room.historyIds.includes(trackId)) {
+    room.historyIds.push(trackId);
+    if (room.historyIds.length > 40) room.historyIds.shift();
+  }
+}
 
-// Keep-alive health check endpoint for Render
-app.get('/api/ping', (req, res) => {
-  res.json({ ok: true, serverTime: Date.now() });
-});
+// ----------------- Core YouTube & Spotify Scrapers -----------------
 
-// Helper: YouTube search without API key via initial data scrape
-async function searchYouTube(query) {
+// 1. Fast YouTube Search with LRU Cache & Rich Metadata
+async function searchYouTube(query, limit = 12) {
+  const cleanQuery = (query || '').trim();
+  if (!cleanQuery) return [];
+
+  const cacheKey = `${cleanQuery.toLowerCase()}::${limit}`;
+  const cached = getCache(searchCache, cacheKey);
+  if (cached) return cached;
+
   try {
-    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`;
+    const url = `https://www.youtube.com/results?search_query=${encodeURIComponent(cleanQuery)}`;
     const res = await fetch(url, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
         'Accept-Language': 'vi,en-US;q=0.9,en;q=0.8'
       }
     });
@@ -77,27 +123,40 @@ async function searchYouTube(query) {
     if (!match) return [];
 
     const data = JSON.parse(match[1]);
-    const contents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents || [];
+    const sectionContents = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents || [];
 
     const results = [];
-    for (const item of contents) {
-      const video = item.videoRenderer;
-      if (video && video.videoId) {
-        const title = video.title?.runs?.[0]?.text || "Unknown Title";
-        const artist = video.ownerText?.runs?.[0]?.text || video.longBylineText?.runs?.[0]?.text || "YouTube";
-        const duration = video.lengthText?.simpleText || "0:00";
-        const thumbnail = video.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg`;
+    for (const section of sectionContents) {
+      const items = section.itemSectionRenderer?.contents || [];
+      for (const item of items) {
+        const video = item.videoRenderer;
+        if (video && video.videoId) {
+          const title = video.title?.runs?.map(r => r.text).join('') || "Unknown Title";
+          const artist = video.ownerText?.runs?.[0]?.text || video.longBylineText?.runs?.[0]?.text || "YouTube";
+          const duration = video.lengthText?.simpleText || (video.badges?.some(b => b.metadataBadgeRenderer?.style === 'BADGE_STYLE_TYPE_LIVE_NOW') ? 'LIVE' : '0:00');
+          const durationSeconds = parseDurationToSeconds(duration);
+          const thumbnail = video.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${video.videoId}/hqdefault.jpg`;
+          const views = video.shortViewCountText?.simpleText || video.viewCountText?.simpleText || '';
 
-        results.push({
-          id: video.videoId,
-          title,
-          artist,
-          duration,
-          thumbnail,
-          source: 'youtube'
-        });
-        if (results.length >= 10) break;
+          results.push({
+            id: video.videoId,
+            title,
+            artist,
+            duration,
+            durationSeconds,
+            views,
+            thumbnail,
+            url: `https://www.youtube.com/watch?v=${video.videoId}`,
+            source: 'youtube'
+          });
+          if (results.length >= limit) break;
+        }
       }
+      if (results.length >= limit) break;
+    }
+
+    if (results.length > 0) {
+      setCache(searchCache, cacheKey, results);
     }
     return results;
   } catch (err) {
@@ -106,55 +165,137 @@ async function searchYouTube(query) {
   }
 }
 
-// Search endpoint
-app.get('/api/search', async (req, res) => {
-  const query = req.query.q;
-  if (!query || !query.trim()) {
-    return res.status(400).json({ error: 'Query is required' });
-  }
-  const results = await searchYouTube(query.trim());
-  res.json({ results });
-});
+// 2. Instant YouTube Autocomplete Suggestions (<50ms)
+async function getYouTubeSuggestions(query) {
+  const cleanQuery = (query || '').trim();
+  if (!cleanQuery) return [];
 
-// Resolve Spotify link or YouTube direct link
-app.post('/api/resolve-url', async (req, res) => {
-  const { url } = req.body;
-  if (!url) return res.status(400).json({ error: 'URL is required' });
+  const cacheKey = cleanQuery.toLowerCase();
+  const cached = getCache(suggestionCache, cacheKey);
+  if (cached) return cached;
 
   try {
-    // 1. Check if Spotify URL
+    const url = `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&hl=vi&q=${encodeURIComponent(cleanQuery)}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+      }
+    });
+    const data = await res.json();
+    const suggestions = Array.isArray(data?.[1]) ? data[1].slice(0, 8) : [];
+    setCache(suggestionCache, cacheKey, suggestions);
+    return suggestions;
+  } catch (err) {
+    return [];
+  }
+}
+
+// 3. YouTube Playlist Extractor
+async function resolveYouTubePlaylist(listId, limit = 25) {
+  try {
+    const url = `https://www.youtube.com/playlist?list=${encodeURIComponent(listId)}`;
+    const res = await fetch(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'vi,en-US;q=0.9,en;q=0.8'
+      }
+    });
+    const html = await res.text();
+    const match = html.match(/var ytInitialData = ({.*?});<\/script>/s) || html.match(/ytInitialData\s*=\s*({.+?});/);
+    if (!match) return [];
+
+    const data = JSON.parse(match[1]);
+    const tabs = data.contents?.twoColumnBrowseResultsRenderer?.tabs || [];
+    const playlistContents =
+      tabs[0]?.tabRenderer?.content?.sectionListRenderer?.contents?.[0]?.itemSectionRenderer?.contents?.[0]?.playlistVideoListRenderer?.contents || [];
+
+    const tracks = [];
+    for (const item of playlistContents) {
+      const v = item.playlistVideoRenderer;
+      if (v && v.videoId) {
+        const title = v.title?.runs?.map(r => r.text).join('') || 'YouTube Track';
+        const artist = v.shortBylineText?.runs?.[0]?.text || 'YouTube';
+        const duration = v.lengthText?.simpleText || '0:00';
+        const durationSeconds = parseDurationToSeconds(duration);
+        const thumbnail = `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`;
+
+        tracks.push({
+          id: v.videoId,
+          title,
+          artist,
+          duration,
+          durationSeconds,
+          thumbnail,
+          url: `https://www.youtube.com/watch?v=${v.videoId}`,
+          source: 'youtube'
+        });
+        if (tracks.length >= limit) break;
+      }
+    }
+    return tracks;
+  } catch (err) {
+    console.error("Playlist resolve error:", err.message);
+    return [];
+  }
+}
+
+// 4. Unified URL Resolver (Spotify, YouTube Video, YouTube Shorts, YouTube Playlist, Direct MP3)
+async function resolveMediaUrl(rawUrl) {
+  const url = (rawUrl || '').trim();
+  if (!url) return { error: 'URL is required' };
+
+  const cached = getCache(resolveCache, url);
+  if (cached) return cached;
+
+  try {
+    // A. Check if Spotify URL
     if (url.includes('spotify.com')) {
       const oembedUrl = `https://open.spotify.com/oembed?url=${encodeURIComponent(url)}`;
       const spotifyRes = await fetch(oembedUrl);
       if (!spotifyRes.ok) {
-        return res.status(404).json({ error: 'Không tìm thấy thông tin bài hát trên Spotify' });
+        return { error: 'Không tìm thấy thông tin bài hát trên Spotify' };
       }
       const spotifyData = await spotifyRes.json();
       const trackTitle = spotifyData.title || "Spotify Track";
       const thumbnail = spotifyData.thumbnail_url;
 
-      // Find matching YouTube stream for high quality playback
-      const ytMatches = await searchYouTube(`${trackTitle} official audio`);
-      const bestMatch = ytMatches[0] || (await searchYouTube(trackTitle))[0];
+      const ytMatches = await searchYouTube(`${trackTitle} official audio`, 5);
+      const bestMatch = ytMatches[0] || (await searchYouTube(trackTitle, 3))[0];
 
       if (!bestMatch) {
-        return res.status(404).json({ error: 'Không tìm thấy bản phát âm thanh tương ứng trên YouTube' });
+        return { error: 'Không tìm thấy bản phát âm thanh tương ứng trên YouTube' };
       }
 
-      return res.json({
+      const result = {
         track: {
           id: bestMatch.id,
           title: trackTitle,
           artist: bestMatch.artist || "Spotify Artist",
           duration: bestMatch.duration,
+          durationSeconds: bestMatch.durationSeconds || 0,
           thumbnail: thumbnail || bestMatch.thumbnail,
+          url: `https://www.youtube.com/watch?v=${bestMatch.id}`,
           source: 'spotify',
           originalUrl: url
         }
-      });
+      };
+      setCache(resolveCache, url, result);
+      return result;
     }
 
-    // 2. Check if YouTube URL
+    // B. Check if pure YouTube Playlist URL
+    const listMatch = url.match(/[?&]list=([^&#]+)/);
+    const hasVideoParam = url.match(/[?&]v=([^&#]+)/) || url.match(/youtu\.be\/([^?&#]+)/);
+    if (listMatch && !hasVideoParam) {
+      const tracks = await resolveYouTubePlaylist(listMatch[1], 25);
+      if (tracks.length > 0) {
+        const result = { track: tracks[0], tracks, isPlaylist: true };
+        setCache(resolveCache, url, result);
+        return result;
+      }
+    }
+
+    // C. Check if YouTube Video / Shorts URL
     let ytId = null;
     const matchWatch = url.match(/[?&]v=([^&#]+)/);
     const matchShort = url.match(/youtu\.be\/([^?&#]+)/);
@@ -180,43 +321,339 @@ app.post('/api/resolve-url', async (req, res) => {
         thumbnail = ytData.thumbnail_url || thumbnail;
       }
 
-      return res.json({
+      const result = {
         track: {
           id: ytId,
           title,
           artist,
           duration: "Playing",
+          durationSeconds: 0,
           thumbnail,
+          url: `https://www.youtube.com/watch?v=${ytId}`,
           source: 'youtube',
           originalUrl: url
         }
-      });
+      };
+      setCache(resolveCache, url, result);
+      return result;
     }
 
-    // 3. Check if Direct Audio URL (.mp3, .m4a, .aac, .ogg, .wav)
+    // D. Check if Direct Audio URL (.mp3, .m4a, .aac, .ogg, .wav)
     if (url.match(/\.(mp3|m4a|aac|ogg|wav)($|\?)/i)) {
       const filename = url.split('/').pop().split('?')[0];
       const cleanTitle = decodeURIComponent(filename).replace(/\.(mp3|m4a|aac|ogg|wav)/i, '').replace(/[-_]/g, ' ');
-      return res.json({
+      const result = {
         track: {
           id: 'audio-' + Date.now(),
           audioUrl: url,
           title: cleanTitle || 'Giai Điệu Tình Yêu',
           artist: 'Audio Trực Tiếp',
           duration: 'MP3',
+          durationSeconds: 0,
           thumbnail: 'https://images.unsplash.com/photo-1518895949257-7621c3c786d7?w=500&auto=format&fit=crop&q=80',
+          url,
           source: 'audio',
           originalUrl: url
         }
-      });
+      };
+      return result;
     }
 
-    return res.status(400).json({ error: 'Link không hợp lệ. Vui lòng dán link YouTube, Spotify hoặc link MP3 trực tiếp.' });
+    return { error: 'Link không hợp lệ. Vui lòng dán link YouTube, Playlist, Spotify hoặc link MP3 trực tiếp.' };
   } catch (err) {
     console.error("Resolve error:", err.message);
-    res.status(500).json({ error: 'Có lỗi xảy ra khi xử lý liên kết.' });
+    return { error: 'Có lỗi xảy ra khi xử lý liên kết.' };
+  }
+}
+
+// 5. Smart Related Tracks Finder (for Auto-Radio & Discord Bot Autoplay)
+async function getRelatedTracks(currentTrack, excludeIds = [], limit = 6) {
+  if (!currentTrack) return [];
+  const cleanArtist = (currentTrack.artist || '').replace(/Official|VEVO|Channel|Topic/gi, '').trim();
+  const cleanTitle = (currentTrack.title || '').replace(/\(.*?\)|\[.*?\]|Official.*?MV|Lyrics|Audio/gi, '').trim();
+
+  const searchQuery = cleanArtist && cleanArtist !== 'YouTube'
+    ? `${cleanArtist} bài hát hay nhất official audio`
+    : `${cleanTitle} nhạc tình yêu chill`;
+
+  const candidates = await searchYouTube(searchQuery, 15);
+  const excludeSet = new Set([currentTrack.id, ...(excludeIds || [])]);
+
+  const filtered = candidates.filter(t => !excludeSet.has(t.id));
+  if (filtered.length >= 2) {
+    return filtered.slice(0, limit);
+  }
+
+  // Fallback to romantic V-Pop mix
+  const fallback = await searchYouTube('nhạc trẻ tình yêu ngọt ngào chill hay nhất', 12);
+  return fallback.filter(t => !excludeSet.has(t.id)).slice(0, limit);
+}
+
+// ----------------- Web & Public API Endpoints -----------------
+
+// Keep-alive health check endpoint for Render
+app.get('/api/ping', (req, res) => {
+  res.json({ ok: true, serverTime: Date.now(), activeRooms: rooms.size });
+});
+
+// Search endpoint (supports both keyword AND direct URL!)
+app.get('/api/search', async (req, res) => {
+  const query = (req.query.q || '').trim();
+  const limit = Math.min(25, Math.max(1, parseInt(req.query.limit, 10) || 12));
+  if (!query) {
+    return res.status(400).json({ error: 'Query is required' });
+  }
+
+  // If user pasted a URL directly into the search box, resolve it seamlessly!
+  if (/^https?:\/\//i.test(query)) {
+    const resolved = await resolveMediaUrl(query);
+    if (resolved.tracks) {
+      return res.json({ results: resolved.tracks, isPlaylist: true });
+    }
+    if (resolved.track) {
+      return res.json({ results: [resolved.track] });
+    }
+  }
+
+  const results = await searchYouTube(query, limit);
+  res.json({ results });
+});
+
+// Autocomplete suggestions endpoint
+app.get('/api/suggestions', async (req, res) => {
+  const query = (req.query.q || '').trim();
+  if (!query) return res.json({ suggestions: [] });
+  const suggestions = await getYouTubeSuggestions(query);
+  res.json({ suggestions });
+});
+
+// Related tracks endpoint
+app.get('/api/related', async (req, res) => {
+  const { id, title, artist } = req.query;
+  const related = await getRelatedTracks({ id, title, artist }, id ? [id] : [], 8);
+  res.json({ results: related });
+});
+
+// Resolve Spotify link, YouTube video/playlist link, or MP3 link
+app.post('/api/resolve-url', async (req, res) => {
+  const { url } = req.body;
+  if (!url) return res.status(400).json({ error: 'URL is required' });
+
+  const resolved = await resolveMediaUrl(url);
+  if (resolved.error) {
+    return res.status(400).json({ error: resolved.error });
+  }
+  res.json(resolved);
+});
+
+// ----------------- 🤖 Discord Bot Dedicated API (/api/bot/*) -----------------
+
+// 1. Unified Search & URL Resolve for Discord Bot (/play command)
+app.get('/api/bot/search', async (req, res) => {
+  const query = (req.query.q || '').trim();
+  const limit = Math.min(25, Math.max(1, parseInt(req.query.limit, 10) || 10));
+  if (!query) {
+    return res.status(400).json({ ok: false, error: 'Missing query parameter ?q=' });
+  }
+
+  if (/^https?:\/\//i.test(query)) {
+    const resolved = await resolveMediaUrl(query);
+    if (resolved.error) {
+      return res.status(404).json({ ok: false, error: resolved.error });
+    }
+    return res.json({
+      ok: true,
+      type: resolved.isPlaylist ? 'playlist' : 'track',
+      track: resolved.track,
+      results: resolved.tracks || [resolved.track]
+    });
+  }
+
+  const results = await searchYouTube(query, limit);
+  res.json({
+    ok: true,
+    type: 'search',
+    track: results[0] || null,
+    results
+  });
+});
+
+// 2. Discord Slash Command Autocomplete (/play autocomplete)
+app.get('/api/bot/autocomplete', async (req, res) => {
+  const query = (req.query.q || '').trim();
+  if (!query) return res.json({ choices: [] });
+
+  const suggestions = await getYouTubeSuggestions(query);
+  const choices = suggestions.slice(0, 10).map(s => ({
+    name: s.length > 95 ? s.slice(0, 95) + '...' : s,
+    value: s.slice(0, 100)
+  }));
+  res.json({ choices });
+});
+
+// 3. Get Live Web Room State from Discord Bot
+app.get('/api/bot/room/:roomId?', (req, res) => {
+  const roomId = (req.params.roomId || DEFAULT_ROOM_ID).trim().toUpperCase();
+  const room = getOrCreateRoom(roomId);
+  res.json({
+    ok: true,
+    roomId: room.id,
+    currentTrack: room.currentTrack,
+    isPlaying: room.isPlaying,
+    currentTime: Math.round(calculateCurrentTime(room)),
+    autoRadio: room.autoRadio !== false,
+    queueCount: room.queue.length,
+    queue: room.queue,
+    users: Array.from(room.users.values()).map(u => ({
+      nickname: u.nickname,
+      avatar: u.avatar,
+      status: u.status
+    }))
+  });
+});
+
+// 4. Control or Play Music in Web Room directly from Discord Bot!
+app.post('/api/bot/room/:roomId?/play', async (req, res) => {
+  const roomId = (req.params.roomId || DEFAULT_ROOM_ID).trim().toUpperCase();
+  const { query, playNow = true, requestedBy = 'Discord Bot 🤖' } = req.body;
+  if (!query) return res.status(400).json({ ok: false, error: 'Missing query or url' });
+
+  const room = getOrCreateRoom(roomId);
+  let track = null;
+
+  if (/^https?:\/\//i.test(query)) {
+    const resolved = await resolveMediaUrl(query);
+    track = resolved.track;
+  } else {
+    const results = await searchYouTube(query, 1);
+    track = results[0];
+  }
+
+  if (!track) {
+    return res.status(404).json({ ok: false, error: 'Không tìm thấy bài hát phù hợp' });
+  }
+
+  if (playNow || !room.currentTrack) {
+    room.currentTrack = track;
+    room.isPlaying = true;
+    room.currentTime = 0;
+    room.lastUpdate = Date.now();
+    rememberTrackHistory(room, track.id);
+
+    io.to(room.id).emit('track_changed', {
+      track: room.currentTrack,
+      isPlaying: true,
+      currentTime: 0,
+      alreadyLoaded: false,
+      triggeredBy: requestedBy
+    });
+
+    return res.json({ ok: true, action: 'playing_now', roomId: room.id, track });
+  } else {
+    const queuedTrack = {
+      ...track,
+      queueId: 'q_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+      addedBy: requestedBy,
+      addedByAvatar: '🤖'
+    };
+    room.queue.push(queuedTrack);
+    io.to(room.id).emit('queue_updated', {
+      queue: room.queue,
+      addedTrack: queuedTrack
+    });
+
+    return res.json({ ok: true, action: 'queued', roomId: room.id, track: queuedTrack, queueLength: room.queue.length });
   }
 });
+
+// 5. Playback Action Control from Discord Bot (pause, resume, skip, seek)
+app.post('/api/bot/room/:roomId?/action', async (req, res) => {
+  const roomId = (req.params.roomId || DEFAULT_ROOM_ID).trim().toUpperCase();
+  const { action, time } = req.body;
+  const room = getOrCreateRoom(roomId);
+
+  if (action === 'pause') {
+    room.isPlaying = false;
+    room.currentTime = calculateCurrentTime(room);
+    room.lastUpdate = Date.now();
+    io.to(room.id).emit('playback_sync', { isPlaying: false, currentTime: room.currentTime, triggeredBy: 'Discord Bot 🤖' });
+  } else if (action === 'resume') {
+    room.isPlaying = true;
+    room.lastUpdate = Date.now();
+    io.to(room.id).emit('playback_sync', { isPlaying: true, currentTime: room.currentTime, triggeredBy: 'Discord Bot 🤖' });
+  } else if (action === 'skip') {
+    await advanceToNextTrack(room, 'Discord Bot 🤖');
+  } else if (action === 'seek' && typeof time === 'number') {
+    room.currentTime = Math.max(0, time);
+    room.lastUpdate = Date.now();
+    io.to(room.id).emit('seek_sync', { currentTime: room.currentTime, triggeredBy: 'Discord Bot 🤖' });
+  } else {
+    return res.status(400).json({ ok: false, error: 'Invalid action. Use pause, resume, skip, or seek.' });
+  }
+
+  res.json({
+    ok: true,
+    roomId: room.id,
+    action,
+    currentTrack: room.currentTrack,
+    isPlaying: room.isPlaying,
+    currentTime: Math.round(calculateCurrentTime(room))
+  });
+});
+
+// ----------------- Helper: Advance Track with Auto-Radio -----------------
+
+async function advanceToNextTrack(room, triggeredBy = 'LoveTunes 💕') {
+  if (room.queue.length > 0) {
+    const nextSong = room.queue.shift();
+    room.currentTrack = nextSong;
+    room.isPlaying = true;
+    room.currentTime = 0;
+    room.lastUpdate = Date.now();
+    room.lastTrackEndAt = Date.now();
+    rememberTrackHistory(room, nextSong.id);
+
+    io.to(room.id).emit('track_changed', {
+      track: room.currentTrack,
+      isPlaying: true,
+      currentTime: 0,
+      triggeredBy
+    });
+    io.to(room.id).emit('queue_updated', { queue: room.queue });
+    return;
+  }
+
+  // If queue is empty and Auto-Radio is enabled, automatically find a related song!
+  if (room.autoRadio !== false && room.currentTrack) {
+    room.lastTrackEndAt = Date.now();
+    const related = await getRelatedTracks(room.currentTrack, room.historyIds || [], 5);
+    if (related.length > 0) {
+      const nextAutoTrack = related[0];
+      room.currentTrack = nextAutoTrack;
+      room.isPlaying = true;
+      room.currentTime = 0;
+      room.lastUpdate = Date.now();
+      rememberTrackHistory(room, nextAutoTrack.id);
+
+      io.to(room.id).emit('track_changed', {
+        track: room.currentTrack,
+        isPlaying: true,
+        currentTime: 0,
+        isAutoRadio: true,
+        triggeredBy: 'Radio Tự Động 📻'
+      });
+      return;
+    }
+  }
+
+  room.isPlaying = false;
+  room.currentTime = 0;
+  room.lastUpdate = Date.now();
+  io.to(room.id).emit('playback_sync', {
+    isPlaying: false,
+    currentTime: 0
+  });
+}
 
 // ----------------- Socket.io Realtime Sync -----------------
 
@@ -228,7 +665,6 @@ io.on('connection', (socket) => {
   socket.on('join_room', ({ roomId, user, clientId }) => {
     const room = getOrCreateRoom(roomId || DEFAULT_ROOM_ID);
 
-    // If switching from another room on the same socket, leave the old room
     if (currentRoomId && currentRoomId !== room.id) {
       const oldRoom = rooms.get(currentRoomId);
       if (oldRoom) {
@@ -245,7 +681,6 @@ io.on('connection', (socket) => {
     currentRoomId = room.id;
     currentClientId = clientId || socket.id;
 
-    // Check if this client was recently connected (quick refresh or mobile network switch)
     const timerKey = `${room.id}:${currentClientId}`;
     let isReconnecting = false;
     if (disconnectTimers.has(timerKey)) {
@@ -254,7 +689,6 @@ io.on('connection', (socket) => {
       isReconnecting = true;
     }
 
-    // Remove any stale socket entries from the same device (clientId)
     for (const [existingSocketId, existingUser] of room.users.entries()) {
       if (existingUser.clientId === currentClientId && existingSocketId !== socket.id) {
         room.users.delete(existingSocketId);
@@ -262,7 +696,6 @@ io.on('connection', (socket) => {
       }
     }
 
-    // Smart role & default profile assignment so 2 people joining don't have duplicate default names
     let resolvedNickname = user?.nickname || 'Anh Thịnh 🌸';
     let resolvedAvatar = user?.avatar || '👑';
     const isCustomProfile = Boolean(user?.isCustom);
@@ -296,12 +729,12 @@ io.on('connection', (socket) => {
 
     const allUsers = Array.from(room.users.values());
 
-    // Send full current room state to joining user
     socket.emit('room_state', {
       roomId: room.id,
       currentTrack: room.currentTrack,
       isPlaying: room.isPlaying,
       currentTime: calculateCurrentTime(room),
+      autoRadio: room.autoRadio !== false,
       serverTimestamp: Date.now(),
       queue: room.queue,
       users: allUsers,
@@ -311,18 +744,15 @@ io.on('connection', (socket) => {
     });
 
     if (isReconnecting) {
-      // Quietly update user list without spamming join toast/chat
       socket.to(room.id).emit('users_updated', {
         users: allUsers
       });
     } else {
-      // Notify others in room
       socket.to(room.id).emit('user_joined', {
         user: currentUser,
         users: allUsers
       });
 
-      // Send cute welcome system message to chat
       const welcomeMsg = {
         id: 'sys_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
         sender: 'LoveTunes 💕',
@@ -346,6 +776,7 @@ io.on('connection', (socket) => {
     room.isPlaying = true;
     room.currentTime = 0;
     room.lastUpdate = Date.now();
+    rememberTrackHistory(room, track.id);
 
     const payload = {
       track: room.currentTrack,
@@ -363,7 +794,19 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Play / Pause toggle (broadcast only to partner to prevent echo feedback loop)
+  // Toggle Auto-Radio mode
+  socket.on('toggle_autoradio', ({ enabled }) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+    room.autoRadio = Boolean(enabled);
+    io.to(room.id).emit('autoradio_updated', {
+      autoRadio: room.autoRadio,
+      triggeredBy: currentUser?.nickname || 'Người Thương'
+    });
+  });
+
+  // Play / Pause toggle
   socket.on('toggle_playback', ({ isPlaying, currentTime }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
@@ -385,7 +828,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Seek time (broadcast only to partner to prevent echo feedback loop)
+  // Seek time
   socket.on('seek_track', ({ time }) => {
     if (!currentRoomId || typeof time !== 'number' || isNaN(time)) return;
     const room = rooms.get(currentRoomId);
@@ -401,7 +844,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Periodic heartbeat from active player for accurate drift correction & room state
+  // Periodic heartbeat from active player
   socket.on('player_heartbeat', ({ trackId, currentTime, isPlaying, playerState }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
@@ -430,7 +873,7 @@ io.on('connection', (socket) => {
     }
   });
 
-  // Explicit playback status update (playing, buffering, autoplay_blocked, paused)
+  // Explicit playback status update
   socket.on('player_status', ({ status }) => {
     if (!currentRoomId || !currentUser) return;
     currentUser.status = status;
@@ -441,42 +884,53 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Add song to shared queue
-  socket.on('add_to_queue', ({ track }) => {
-    if (!currentRoomId || !track) return;
+  // Add single song or multiple playlist songs to shared queue
+  socket.on('add_to_queue', ({ track, tracks }) => {
+    if (!currentRoomId || (!track && (!tracks || !tracks.length))) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
-    const queuedTrack = {
-      ...track,
-      queueId: 'q_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
-      addedBy: currentUser?.nickname || 'Người Thương',
-      addedByAvatar: currentUser?.avatar || '💖'
-    };
+    const listToAdd = Array.isArray(tracks) && tracks.length > 0 ? tracks : [track];
+    let lastAdded = null;
 
-    // If nothing is playing, play immediately!
-    if (!room.currentTrack) {
-      room.currentTrack = queuedTrack;
-      room.isPlaying = true;
-      room.currentTime = 0;
-      room.lastUpdate = Date.now();
+    for (const item of listToAdd) {
+      if (!item) continue;
+      const queuedTrack = {
+        ...item,
+        queueId: 'q_' + Date.now() + '_' + Math.random().toString(36).substr(2, 5),
+        addedBy: currentUser?.nickname || 'Người Thương',
+        addedByAvatar: currentUser?.avatar || '💖'
+      };
 
-      io.to(room.id).emit('track_changed', {
-        track: room.currentTrack,
-        isPlaying: true,
-        currentTime: 0,
-        senderId: socket.id,
-        alreadyLoaded: false,
-        triggeredBy: currentUser?.nickname || 'Người Thương'
-      });
-      return;
+      if (!room.currentTrack) {
+        room.currentTrack = queuedTrack;
+        room.isPlaying = true;
+        room.currentTime = 0;
+        room.lastUpdate = Date.now();
+        rememberTrackHistory(room, queuedTrack.id);
+
+        io.to(room.id).emit('track_changed', {
+          track: room.currentTrack,
+          isPlaying: true,
+          currentTime: 0,
+          senderId: socket.id,
+          alreadyLoaded: false,
+          triggeredBy: currentUser?.nickname || 'Người Thương'
+        });
+      } else {
+        room.queue.push(queuedTrack);
+        lastAdded = queuedTrack;
+      }
     }
 
-    room.queue.push(queuedTrack);
-    io.to(room.id).emit('queue_updated', {
-      queue: room.queue,
-      addedTrack: queuedTrack
-    });
+    if (lastAdded || listToAdd.length > 1) {
+      io.to(room.id).emit('queue_updated', {
+        queue: room.queue,
+        addedTrack: listToAdd.length > 1
+          ? { title: `${listToAdd.length} bài hát từ Playlist`, addedBy: currentUser?.nickname || 'Người Thương' }
+          : lastAdded
+      });
+    }
   });
 
   // Remove from queue
@@ -489,59 +943,29 @@ io.on('connection', (socket) => {
     io.to(room.id).emit('queue_updated', { queue: room.queue });
   });
 
-  // Helper to advance room to next song
-  function advanceToNextTrack(room) {
-    if (room.queue.length > 0) {
-      const nextSong = room.queue.shift();
-      room.currentTrack = nextSong;
-      room.isPlaying = true;
-      room.currentTime = 0;
-      room.lastUpdate = Date.now();
-      room.lastTrackEndAt = Date.now();
-
-      io.to(room.id).emit('track_changed', {
-        track: room.currentTrack,
-        isPlaying: true,
-        currentTime: 0,
-        triggeredBy: currentUser?.nickname || 'LoveTunes 💕'
-      });
-      io.to(room.id).emit('queue_updated', { queue: room.queue });
-    } else {
-      room.isPlaying = false;
-      room.currentTime = 0;
-      room.lastUpdate = Date.now();
-      io.to(room.id).emit('playback_sync', {
-        isPlaying: false,
-        currentTime: 0
-      });
-    }
-  }
-
-  // Natural track end (deduplicated so 2 clients finishing together don't skip 2 songs)
-  socket.on('track_ended', ({ trackId }) => {
+  // Natural track end
+  socket.on('track_ended', async ({ trackId }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room || !room.currentTrack) return;
 
-    // Ignore if room already moved to another track or ended within last 3 seconds
     if (trackId && room.currentTrack.id !== trackId) return;
     if (Date.now() - (room.lastTrackEndAt || 0) < 3000) return;
 
-    advanceToNextTrack(room);
+    await advanceToNextTrack(room, currentUser?.nickname || 'LoveTunes 💕');
   });
 
   // Manual Next track button click
-  socket.on('next_track', () => {
+  socket.on('next_track', async () => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
-    // Short 800ms debounce against accidental double clicks
     if (Date.now() - (room.lastTrackEndAt || 0) < 800) return;
-    advanceToNextTrack(room);
+    await advanceToNextTrack(room, currentUser?.nickname || 'Người Thương');
   });
 
-  // Sync request from client (e.g. click "Đồng bộ tức thì" or onPlayerReady)
+  // Sync request from client
   socket.on('request_sync', (data) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
@@ -556,7 +980,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Floating love reactions (hearts, kisses, flowers floating on both screens)
+  // Floating love reactions
   socket.on('send_reaction', ({ emoji, count, position }) => {
     if (!currentRoomId) return;
     io.to(currentRoomId).emit('reaction_received', {
@@ -591,7 +1015,7 @@ io.on('connection', (socket) => {
     io.to(room.id).emit('chat_received', chatItem);
   });
 
-  // Profile update (name/avatar change)
+  // Profile update
   socket.on('update_profile', ({ nickname, avatar, isCustom }) => {
     if (!currentRoomId || !currentUser) return;
     const room = rooms.get(currentRoomId);
@@ -607,7 +1031,7 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Disconnect with grace period for mobile app-switching / page reload
+  // Disconnect with grace period
   socket.on('disconnect', () => {
     if (!currentRoomId || !rooms.has(currentRoomId)) return;
     const room = rooms.get(currentRoomId);
@@ -617,11 +1041,9 @@ io.on('connection', (socket) => {
 
     room.users.delete(departingSocketId);
 
-    // Wait 4 seconds before announcing departure in case the user is just refreshing or reconnecting
     const timerKey = `${room.id}:${departingClientId}`;
     const timer = setTimeout(() => {
       disconnectTimers.delete(timerKey);
-      // Check if user reconnected with another socket using same clientId
       const stillInRoom = Array.from(room.users.values()).some(u => u.clientId === departingClientId);
       if (!stillInRoom) {
         io.to(room.id).emit('user_left', {
@@ -639,5 +1061,5 @@ io.on('connection', (socket) => {
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
   console.log(`🌸 LoveTunes Server đang chạy tại: http://localhost:${PORT}`);
-  console.log(`🎧 Sẵn sàng kết nối phòng nghe đôi cho bạn và người thương!`);
+  console.log(`🎧 Sẵn sàng kết nối phòng nghe đôi & API cho Discord Bot!`);
 });

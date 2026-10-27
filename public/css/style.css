@@ -1120,6 +1120,68 @@ body {
 .search-input-box {
   position: relative;
   margin-bottom: 14px;
+  z-index: 25;
+}
+
+.search-suggestions-dropdown {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  right: 0;
+  background: rgba(255, 255, 255, 0.98);
+  backdrop-filter: blur(16px);
+  border: 1.5px solid var(--pink-border);
+  border-radius: var(--radius-lg);
+  box-shadow: 0 12px 32px rgba(255, 100, 140, 0.22);
+  overflow: hidden;
+  display: none;
+  flex-direction: column;
+  z-index: 50;
+}
+
+.search-suggestions-dropdown.active {
+  display: flex;
+}
+
+.suggestion-item {
+  padding: 9px 16px;
+  font-size: 13px;
+  color: var(--text-main);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid var(--pink-soft);
+  transition: background 0.15s ease;
+}
+
+.suggestion-item:last-child {
+  border-bottom: none;
+}
+
+.suggestion-item:hover {
+  background: var(--pink-light);
+  color: var(--primary-pink);
+  font-weight: 600;
+}
+
+.btn-autoradio-pill {
+  background: var(--pink-light);
+  border: 1px solid var(--pink-border);
+  color: var(--text-secondary);
+  padding: 4px 12px;
+  border-radius: var(--radius-full);
+  font-size: 11px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+}
+
+.btn-autoradio-pill.active {
+  background: linear-gradient(135deg, #ff6b8b, #ff3360);
+  color: white;
+  border-color: transparent;
+  box-shadow: 0 2px 8px var(--primary-glow);
 }
 
 .custom-input {

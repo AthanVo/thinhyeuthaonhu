@@ -244,10 +244,11 @@
               </div>
             </div>
 
-            <!-- YouTube Search Bar -->
+            <!-- YouTube Search Bar with Instant Autocomplete -->
             <div class="search-input-box">
               <span class="search-input-icon">🔍</span>
-              <input type="text" class="custom-input" id="search-query-input" placeholder="Tìm tên bài hát hoặc ca sĩ yêu thích...">
+              <input type="text" class="custom-input" id="search-query-input" placeholder="Tìm tên bài hát, ca sĩ hoặc dán thẳng link vào đây..." autocomplete="off">
+              <div class="search-suggestions-dropdown" id="search-suggestions-box"></div>
             </div>
 
             <div class="search-results-list" id="search-results-list">
@@ -261,7 +262,9 @@
           <div class="tab-pane" id="pane-queue" role="tabpanel">
             <div class="queue-header-stats">
               <span>Danh sách chờ phát</span>
-              <span style="font-size: 11px; color: var(--primary-pink); font-weight: 600;">Tự động chuyển bài khi kết thúc</span>
+              <button class="btn-autoradio-pill active" id="btn-toggle-autoradio" title="Khi hết hàng đợi sẽ tự động tìm nhạc tình yêu liên quan để phát tiếp">
+                <span>📻 Tự phát tiếp: BẬT</span>
+              </button>
             </div>
             <div class="queue-items-container" id="queue-items-container">
               <!-- Populated dynamically -->
