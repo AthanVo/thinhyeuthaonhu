@@ -41,10 +41,14 @@
 
       <!-- Room Code & Invite Action -->
       <div class="room-badge-group">
-        <div class="room-chip" id="room-display-chip">
+        <div class="room-chip" id="room-display-chip" title="Nhấn để đổi mã phòng khác" style="cursor: pointer;">
           <span>Phòng:</span>
-          <span class="room-code-tag" id="current-room-code">LOVE-0000</span>
+          <span class="room-code-tag" id="current-room-code">THINH-NHU</span>
         </div>
+        <button class="btn-pill" id="btn-edit-profile" title="Chọn bạn là Anh Thịnh hay Bé Thảo Như">
+          <span>💑</span>
+          <span>Đổi Tên</span>
+        </button>
         <button class="btn-pill btn-pill-primary" id="btn-copy-room-link" title="Sao chép liên kết phòng gửi cho Thảo Như">
           <span>💌</span>
           <span>Mời Thảo Như</span>
@@ -86,13 +90,17 @@
             <span>✨</span>
           </div>
           <div class="player-header-actions">
-            <button class="btn-pill btn-pip-mode" id="btn-pip-mode" title="Cửa sổ nổi PiP - vừa nghe nhạc vừa lướt Zalo/Facebook">
-              <span>🪟</span>
-              <span>Cửa Sổ Nổi</span>
+            <button class="btn-pill btn-pocket-mode" id="btn-pocket-mode" title="Màn hình đen OLED - Bỏ túi tiết kiệm 95% pin & nhạc không tắt">
+              <span>🌙</span>
+              <span>Bỏ Túi (Màn Hình Đen)</span>
             </button>
             <button class="btn-pill btn-toggle-view" id="btn-toggle-view" title="Chuyển đổi Đĩa Than / Xem MV">
               <span>📺</span>
               <span>Xem MV</span>
+            </button>
+            <button class="btn-pill btn-help-multitask" id="btn-help-multitask" title="Mẹo vừa nghe nhạc vừa lướt Zalo / Facebook">
+              <span>💡</span>
+              <span>Lướt App</span>
             </button>
           </div>
         </div>
@@ -311,11 +319,20 @@
   <!-- Profile / Nickname Modal -->
   <div class="modal-overlay" id="profile-modal">
     <div class="modal-glass-card" role="dialog" aria-modal="true" aria-labelledby="modal-title">
-      <h3 class="modal-title" id="modal-title">Thông Tin Của Bạn 🌸</h3>
-      <p class="modal-subtitle">Đặt biệt danh ngọt ngào để người yêu nhìn thấy nhé!</p>
+      <h3 class="modal-title" id="modal-title">Bạn Là Ai Trong Phòng? 🌸</h3>
+      <p class="modal-subtitle">Chọn nhanh 1 chạm hoặc tự đặt biệt danh ngọt ngào nhé!</p>
+
+      <div style="display: flex; gap: 10px; margin-bottom: 18px;">
+        <button class="btn-pill" id="btn-preset-thinh" style="flex: 1; justify-content: center; padding: 10px; border-color: #ff5277;">
+          <span>🦏</span> <span>Anh Thịnh</span>
+        </button>
+        <button class="btn-pill" id="btn-preset-nhu" style="flex: 1; justify-content: center; padding: 10px; border-color: #ff5277;">
+          <span>🐱</span> <span>Bé Thảo Như</span>
+        </button>
+      </div>
 
       <div class="form-group">
-        <label class="form-label" for="profile-name-input">Biệt danh của bạn:</label>
+        <label class="form-label" for="profile-name-input">Hoặc tự nhập biệt danh:</label>
         <input type="text" class="custom-input" id="profile-name-input" placeholder="Ví dụ: Anh Thịnh, Bé Thảo Như, v.v.">
       </div>
 
@@ -336,6 +353,53 @@
         <button class="btn-pill" id="btn-close-modal" style="flex: 1; justify-content: center;">Hủy</button>
         <button class="btn-block-action" id="btn-save-profile" style="flex: 1.5;">Lưu Lại</button>
       </div>
+    </div>
+  </div>
+
+  <!-- 🌙 OLED Pocket Mode Screen Saver (0% Pixel Battery, Accidental Touch Lock) -->
+  <div id="oled-pocket-overlay" class="oled-pocket-overlay hidden" aria-hidden="true">
+    <div class="oled-pocket-content">
+      <div class="oled-heart-pulse">♥</div>
+      <div class="oled-song-title" id="oled-song-title">Đang phát nhạc...</div>
+      <div class="oled-song-artist" id="oled-song-artist">Thịnh &amp; Thảo Như 💕</div>
+      <div class="oled-clock" id="oled-clock">--:--</div>
+      <div class="oled-badge">
+        <span class="oled-badge-icon">🌙</span>
+        <span>Màn hình đang ở chế độ đen OLED tiết kiệm 95% pin.<br>Nhạc vẫn phát liên tục khi để trong túi hoặc đi ngủ.<br>Đã khóa cảm ứng chống chạm nhầm.</span>
+      </div>
+      <button class="oled-wake-button" id="oled-wake-btn">
+        <span>☀️ Chạm vào đây hoặc Chạm 2 lần để bật sáng màn hình</span>
+      </button>
+    </div>
+  </div>
+
+  <!-- 💡 Multitask & Background Guide Modal -->
+  <div class="modal-overlay hidden" id="multitask-modal">
+    <div class="modal-glass-card modal-help-card" role="dialog" aria-modal="true">
+      <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px;">
+        <h3 class="modal-title" style="margin: 0; font-size: 18px;">💡 Vừa Nghe Nhạc Vừa Lướt App Khác</h3>
+        <button class="modal-close-icon" id="btn-close-help" style="background: none; border: none; font-size: 20px; cursor: pointer; color: var(--text-muted);">✕</button>
+      </div>
+      <div class="help-scroll-content">
+        <div class="help-item-card">
+          <div class="help-item-title">📱 Dành cho iPhone (iOS Safari)</div>
+          <p>1. Nhấn nút <strong>"📺 Xem MV"</strong> để hiện màn hình video YouTube.</p>
+          <p>2. Chạm vào video, chọn biểu tượng <strong>Toàn màn hình ⛶</strong>.</p>
+          <p>3. Nhấn biểu tượng <strong>Cửa sổ nổi (PiP)</strong> của Apple ở góc trên bên trái video.</p>
+          <p>4. Vuốt về màn hình Home: Khung video sẽ thu nhỏ nổi trên màn hình và bạn thoải mái mở Zalo, Facebook, TikTok mà nhạc vẫn phát!</p>
+        </div>
+        <div class="help-item-card">
+          <div class="help-item-title">🤖 Dành cho Android (Chrome)</div>
+          <p>1. Nhấn nút <strong>"📺 Xem MV"</strong> rồi chọn mở Toàn màn hình video.</p>
+          <p>2. Vuốt thanh điều hướng về Home (hoặc bấm nút Home vật lý).</p>
+          <p>3. Chrome sẽ tự động ghim khung video thu nhỏ (PiP) trên màn hình, vừa nghe vừa làm việc khác vô tư!</p>
+        </div>
+        <div class="help-item-card highlight">
+          <div class="help-item-title">🌙 Muốn nghe khi bỏ túi hoặc đi ngủ?</div>
+          <p>Chỉ cần bấm nút <strong>"🌙 Bỏ Túi (Màn Hình Đen)"</strong> ngay trên đĩa than! Màn hình điện thoại sẽ đen kịt (OLED 0% tốn pin), khóa chống chạm nhầm và nhạc đôi chạy xuyên suốt không bao giờ dừng!</p>
+        </div>
+      </div>
+      <button class="btn-block-action" id="btn-understood" style="margin-top: 16px;">Đã hiểu rồi 💕</button>
     </div>
   </div>
 

@@ -1,18 +1,30 @@
 // LoveTunes Main Application Logic & Room Coordinator
 
+const DEFAULT_COUPLE_ROOM = 'THINH-NHU';
+
 class LoveTunesApp {
   constructor() {
-    this.socket = io();
+    this.socket = io({
+      reconnection: true,
+      reconnectionAttempts: Infinity,
+      reconnectionDelay: 800,
+      reconnectionDelayMax: 4000,
+      timeout: 20000,
+      transports: ['websocket', 'polling']
+    });
     this.player = null;
     this.effects = new HeartEffects('hearts-canvas');
-    this.roomId = this.getRoomFromUrl() || this.generateRoomId();
+    this.clientId = this.getOrCreateClientId();
+    this.roomId = this.getRoomFromUrl() || DEFAULT_COUPLE_ROOM;
     this.currentUser = this.loadUserProfile();
     this.partnerUser = null;
+    this.partnerPlaybackStatus = 'online';
     this.togetherStartTime = null;
     this.queue = [];
 
     // DOM Elements
     this.elRoomCode = document.getElementById('current-room-code');
+    this.elRoomChip = document.getElementById('room-display-chip');
     this.elCopyLinkBtn = document.getElementById('btn-copy-room-link');
     this.elTogetherTimer = document.getElementById('together-timer-badge');
     this.elPartnerState = document.getElementById('partner-state-pill');
@@ -43,62 +55,87 @@ class LoveTunesApp {
     this.setupSocketEvents();
     this.setupInteractions();
     this.startTogetherTimer();
+    this.startServerKeepAlive();
 
-    // Join Socket Room
-    this.socket.emit('join_room', {
-      roomId: this.roomId,
-      user: this.currentUser
-    });
+    // Update URL query param if not present
+    this.syncRoomToUrl();
+  }
 
-    // Check if new room created without query param, update URL without reload
+  getOrCreateClientId() {
+    let cid = localStorage.getItem('lovetunes_client_id');
+    if (!cid) {
+      cid = 'lt_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 8);
+      localStorage.setItem('lovetunes_client_id', cid);
+    }
+    return cid;
+  }
+
+  getRoomFromUrl() {
+    const params = new URLSearchParams(window.location.search);
+    const room = params.get('room');
+    if (!room || !room.trim()) return null;
+    return room.trim().toUpperCase();
+  }
+
+  syncRoomToUrl() {
     const url = new URL(window.location);
     if (url.searchParams.get('room') !== this.roomId) {
       url.searchParams.set('room', this.roomId);
       window.history.replaceState({}, '', url);
     }
+    if (this.elRoomCode) {
+      this.elRoomCode.textContent = this.roomId;
+    }
   }
 
-  getRoomFromUrl() {
-    const params = new URLSearchParams(window.location.search);
-    return params.get('room') ? params.get('room').toUpperCase() : null;
+  joinCurrentRoom() {
+    this.socket.emit('join_room', {
+      roomId: this.roomId,
+      user: this.currentUser,
+      clientId: this.clientId
+    });
   }
 
-  generateRoomId() {
-    const words = ['LOVE', 'SWEET', 'HONEY', 'CHILL', 'COUPLE'];
-    const word = words[Math.floor(Math.random() * words.length)];
-    const num = Math.floor(1000 + Math.random() * 9000);
-    return `${word}-${num}`;
+  switchRoom(newRoomCode) {
+    const cleaned = (newRoomCode || DEFAULT_COUPLE_ROOM).trim().toUpperCase().replace(/[^A-Z0-9_-]/g, '');
+    if (!cleaned) return;
+    this.roomId = cleaned;
+    this.syncRoomToUrl();
+    this.joinCurrentRoom();
+    this.showToast(`🌸 Đã chuyển sang phòng: ${this.roomId}`);
   }
 
   loadUserProfile() {
     const saved = localStorage.getItem('lovetunes_profile');
     if (saved) {
-      try { return JSON.parse(saved); } catch (e) {}
+      try {
+        const parsed = JSON.parse(saved);
+        if (parsed && parsed.nickname) return parsed;
+      } catch (e) {}
     }
-    // Default romantic nicknames for Thịnh and Thảo Như
-    const hasRoomParam = new URLSearchParams(window.location.search).get('room');
-    const defaultProfile = hasRoomParam ? {
-      nickname: 'Bé Thảo Như 💕',
-      avatar: '🌸',
-      color: '#ff5277'
-    } : {
+    const defaultProfile = {
       nickname: 'Anh Thịnh 🌸',
       avatar: '👑',
-      color: '#ff5277'
+      color: '#ff5277',
+      isCustom: false
     };
     localStorage.setItem('lovetunes_profile', JSON.stringify(defaultProfile));
     return defaultProfile;
   }
 
   saveUserProfile(profile) {
-    this.currentUser = profile;
-    localStorage.setItem('lovetunes_profile', JSON.stringify(profile));
+    this.currentUser = {
+      ...profile,
+      isCustom: true
+    };
+    localStorage.setItem('lovetunes_profile', JSON.stringify(this.currentUser));
     this.renderUserProfile();
     this.socket.emit('update_profile', {
-      nickname: profile.nickname,
-      avatar: profile.avatar
+      nickname: this.currentUser.nickname,
+      avatar: this.currentUser.avatar,
+      isCustom: true
     });
-    this.showToast("Đã cập nhật thông tin của bạn! ✨");
+    this.showToast(`Đã cập nhật bạn là: ${this.currentUser.avatar} ${this.currentUser.nickname} ✨`);
   }
 
   renderUserProfile() {
@@ -110,6 +147,17 @@ class LoveTunesApp {
 
   setupRoomInfo() {
     if (this.elRoomCode) this.elRoomCode.textContent = this.roomId;
+
+    // Click room chip to switch room or reset to THINH-NHU
+    this.elRoomChip?.addEventListener('click', () => {
+      const input = prompt(
+        `Mã phòng hiện tại: ${this.roomId}\nNhập mã phòng mới (hoặc để trống để về phòng mặc định ${DEFAULT_COUPLE_ROOM}):`,
+        this.roomId
+      );
+      if (input !== null) {
+        this.switchRoom(input.trim() || DEFAULT_COUPLE_ROOM);
+      }
+    });
 
     this.elCopyLinkBtn?.addEventListener('click', () => {
       const roomUrl = `${window.location.origin}${window.location.pathname}?room=${this.roomId}`;
@@ -139,70 +187,111 @@ class LoveTunesApp {
     });
   }
 
+  findPartnerFromList(users) {
+    if (!Array.isArray(users)) return null;
+    // Prefer matching a different device (clientId), fallback to different socket.id
+    return (
+      users.find(u => u.clientId && u.clientId !== this.clientId) ||
+      users.find(u => u.id !== this.socket.id) ||
+      null
+    );
+  }
+
   // Socket Events
   setupSocketEvents() {
+    // Automatically join/re-join room on initial connect AND any reconnect
+    this.socket.on('connect', () => {
+      this.joinCurrentRoom();
+    });
+
+    this.socket.on('disconnect', () => {
+      if (this.elPartnerState) {
+        this.elPartnerState.textContent = 'Đang kết nối lại máy chủ... 🔄';
+        this.elPartnerState.className = 'partner-state-pill';
+      }
+    });
+
     this.socket.on('room_state', (state) => {
       this.roomId = state.roomId;
+      this.syncRoomToUrl();
       this.togetherStartTime = state.createdAt;
       this.queue = state.queue || [];
       this.renderQueue();
 
-      // Render other users in room
-      const partner = state.users.find(u => u.id !== state.you.id);
+      // Adopt server-assigned smart couple profile if user hasn't customized
+      if (state.you && !this.currentUser.isCustom) {
+        this.currentUser.nickname = state.you.nickname;
+        this.currentUser.avatar = state.you.avatar;
+        localStorage.setItem('lovetunes_profile', JSON.stringify(this.currentUser));
+        this.renderUserProfile();
+      }
+
+      // Render partner in room
+      const partner = this.findPartnerFromList(state.users);
+      if (partner?.status) this.partnerPlaybackStatus = partner.status;
       this.updatePartnerUI(partner);
 
       // Render chat messages
       this.renderChatHistory(state.chatMessages || []);
 
-      // If there's currently a track playing in room
+      // Sync current track if playing in room
       if (state.currentTrack) {
-        this.player.currentTrack = state.currentTrack;
-        this.player.updateTrackMetadataUI(state.currentTrack);
-        if (this.player.isReady) {
-          this.player.loadTrack(state.currentTrack, state.isPlaying, state.currentTime);
-        }
+        this.player.applyRoomState(state.currentTrack, state.isPlaying, state.currentTime);
       }
     });
 
     this.socket.on('user_joined', ({ user, users }) => {
-      const partner = users.find(u => u.id !== this.socket.id);
+      const partner = this.findPartnerFromList(users);
+      this.partnerPlaybackStatus = partner?.status || 'online';
       this.updatePartnerUI(partner);
       this.showToast(`✨ ${user.nickname} vừa vào phòng cùng bạn!`);
       this.effects.burst('🌸', 15);
     });
 
     this.socket.on('user_left', ({ user, users }) => {
-      const partner = users.find(u => u.id !== this.socket.id);
+      const partner = this.findPartnerFromList(users);
       this.updatePartnerUI(partner);
-      this.showToast(`🍃 ${user.nickname} đã rời phòng.`);
+      if (user?.nickname) {
+        this.showToast(`🍃 ${user.nickname} đã rời phòng.`);
+      }
     });
 
     this.socket.on('users_updated', ({ users }) => {
-      const partner = users.find(u => u.id !== this.socket.id);
+      const partner = this.findPartnerFromList(users);
       this.updatePartnerUI(partner);
     });
 
-    this.socket.on('track_changed', ({ track, isPlaying, currentTime, triggeredBy }) => {
-      this.player.loadTrack(track, isPlaying, currentTime);
-      this.showToast(`🎶 Đang phát: ${track.title}`);
-
-      // Check if mobile blocked background autoplay for partner
-      setTimeout(() => {
-        if (this.player.player && typeof this.player.player.getPlayerState === 'function') {
-          const state = this.player.player.getPlayerState();
-          // If song is supposed to be playing but mobile browser kept it paused/unstarted
-          if (isPlaying && state !== 1 && state !== 3) {
-            this.showMobilePlayPrompt(track, triggeredBy);
-          }
-        }
-      }, 1200);
+    this.socket.on('partner_status', ({ status }) => {
+      this.partnerPlaybackStatus = status || 'online';
+      if (this.partnerUser) {
+        this.updatePartnerUI(this.partnerUser);
+      }
     });
 
-    this.socket.on('playback_sync', ({ isPlaying, currentTime, triggeredBy }) => {
+    this.socket.on('partner_heartbeat', (data) => {
+      this.partnerPlaybackStatus = 'playing';
+      if (this.partnerUser) {
+        this.updatePartnerUI(this.partnerUser);
+      }
+      this.player.onPartnerHeartbeat(data);
+    });
+
+    this.socket.on('track_changed', ({ track, isPlaying, currentTime, senderId, alreadyLoaded, triggeredBy }) => {
+      // Skip duplicate reload if this client already loaded the track on click
+      if (alreadyLoaded && senderId === this.socket.id) {
+        return;
+      }
+      this.player.loadTrack(track, isPlaying, currentTime);
+      this.showToast(`🎶 Đang phát: ${track.title}`);
+    });
+
+    this.socket.on('playback_sync', ({ isPlaying, currentTime, senderId }) => {
+      if (senderId === this.socket.id) return;
       this.player.syncPlayback(isPlaying, currentTime);
     });
 
-    this.socket.on('seek_sync', ({ currentTime, triggeredBy }) => {
+    this.socket.on('seek_sync', ({ currentTime, senderId }) => {
+      if (senderId === this.socket.id) return;
       this.player.syncSeek(currentTime);
     });
 
@@ -214,19 +303,25 @@ class LoveTunesApp {
       }
     });
 
-    this.socket.on('sync_response', ({ currentTrack, isPlaying, currentTime }) => {
-      if (currentTrack) {
-        if (!this.player.currentTrack || this.player.currentTrack.id !== currentTrack.id) {
-          this.player.loadTrack(currentTrack, isPlaying, currentTime);
-        } else {
-          this.player.syncPlayback(isPlaying, currentTime);
-        }
+    this.socket.on('sync_response', ({ currentTrack, isPlaying, currentTime, clientSentAt }) => {
+      if (!currentTrack) return;
+      // Compensate for one-way network latency using RTT (zero clock-skew issue)
+      let compensatedTime = currentTime || 0;
+      if (isPlaying && clientSentAt) {
+        const rttSec = Math.max(0, (Date.now() - clientSentAt) / 1000);
+        compensatedTime += rttSec / 2;
+      }
+
+      if (!this.player.currentTrack || this.player.currentTrack.id !== currentTrack.id) {
+        this.player.loadTrack(currentTrack, isPlaying, compensatedTime);
+      } else {
+        this.player.syncPlayback(isPlaying, compensatedTime);
       }
     });
 
-    this.socket.on('reaction_received', ({ emoji, count, sender }) => {
+    this.socket.on('reaction_received', ({ emoji, count, sender, senderId }) => {
       this.effects.burst(emoji, count * 12);
-      if (sender !== this.currentUser.nickname) {
+      if (senderId !== this.socket.id) {
         this.showToast(`${sender} gửi bạn ngập tràn ${emoji}! 💕`);
       }
     });
@@ -245,7 +340,15 @@ class LoveTunesApp {
         this.elPartnerAvatar.style.borderColor = '#ff3360';
       }
       if (this.elPartnerState) {
-        this.elPartnerState.textContent = `Đang nghe cùng ${partner.nickname} 💕`;
+        let stateText = `🟢 Đang nghe cùng ${partner.nickname} 💕`;
+        if (this.partnerPlaybackStatus === 'autoplay_blocked') {
+          stateText = `🔇 Chờ ${partner.nickname} chạm bật tiếng...`;
+        } else if (this.partnerPlaybackStatus === 'buffering') {
+          stateText = `⏳ ${partner.nickname} đang tải nhạc...`;
+        } else if (this.partnerPlaybackStatus === 'paused') {
+          stateText = `⏸ Đang tạm dừng cùng ${partner.nickname}`;
+        }
+        this.elPartnerState.textContent = stateText;
         this.elPartnerState.className = 'partner-state-pill online';
       }
     } else {
@@ -255,10 +358,18 @@ class LoveTunesApp {
         this.elPartnerAvatar.style.borderColor = '#ccc';
       }
       if (this.elPartnerState) {
-        this.elPartnerState.textContent = 'Đang chờ người yêu kết nối... 🎧';
+        const waitingWho = this.currentUser.nickname.includes('Thịnh') ? 'Bé Thảo Như' : 'Anh Thịnh';
+        this.elPartnerState.textContent = `Đang chờ ${waitingWho} vào phòng (${this.roomId})... 🎧`;
         this.elPartnerState.className = 'partner-state-pill';
       }
     }
+  }
+
+  playTrackNow(track) {
+    this.player.unlockAudio();
+    this.player.loadTrack(track, true, 0);
+    this.socket.emit('play_track', { track, alreadyLoaded: true });
+    this.effects.burst('🎵', 8);
   }
 
   // Setup UI Interactions
@@ -316,6 +427,29 @@ class LoveTunesApp {
     this.elMyAvatar?.addEventListener('click', () => this.openProfileModal());
     document.getElementById('btn-edit-profile')?.addEventListener('click', () => this.openProfileModal());
     document.getElementById('btn-close-modal')?.addEventListener('click', () => this.closeProfileModal());
+    document.getElementById('profile-modal')?.addEventListener('click', (e) => {
+      if (e.target.id === 'profile-modal') this.closeProfileModal();
+    });
+
+    // Quick 1-Tap Couple Identity Presets
+    document.getElementById('btn-preset-thinh')?.addEventListener('click', () => {
+      this.saveUserProfile({
+        nickname: 'Anh Thịnh 🌸',
+        avatar: '🦏',
+        color: '#ff5277'
+      });
+      this.closeProfileModal();
+    });
+
+    document.getElementById('btn-preset-nhu')?.addEventListener('click', () => {
+      this.saveUserProfile({
+        nickname: 'Bé Thảo Như 💕',
+        avatar: '🐱',
+        color: '#ff5277'
+      });
+      this.closeProfileModal();
+    });
+
     document.getElementById('btn-save-profile')?.addEventListener('click', () => {
       const name = document.getElementById('profile-name-input').value.trim();
       const selectedAvatar = document.querySelector('.avatar-option-btn.selected')?.getAttribute('data-avatar') || '🌸';
@@ -441,15 +575,11 @@ class LoveTunesApp {
 
     const handlePlayAction = (e) => {
       e.stopPropagation();
-      this.player.unlockAudio();
-      this.player.loadTrack(track, true, 0);
-      this.socket.emit('play_track', { track });
-      this.effects.burst('🎵', 8);
+      this.playTrackNow(track);
     };
 
     const playBtn = card.querySelector('.btn-play-now');
     playBtn.addEventListener('click', handlePlayAction);
-    playBtn.addEventListener('touchend', handlePlayAction);
 
     card.querySelector('.btn-queue-add').addEventListener('click', (e) => {
       e.stopPropagation();
@@ -476,7 +606,7 @@ class LoveTunesApp {
       <div class="prompt-content">
         <span class="prompt-icon">🎧</span>
         <div class="prompt-info">
-          <div class="prompt-title"><strong>${triggeredBy}</strong> vừa phát nhạc:</div>
+          <div class="prompt-title"><strong>${triggeredBy || 'Người Thương'}</strong> đang phát nhạc:</div>
           <div class="prompt-song">${track.title}</div>
         </div>
       </div>
@@ -486,14 +616,13 @@ class LoveTunesApp {
     const handlePromptTap = (e) => {
       e?.preventDefault();
       this.player.unlockAudio();
-      this.player.loadTrack(track, true, 0);
+      this.player.syncPlayback(true, this.player.getCurrentTime());
+      this.socket.emit('request_sync', { clientSentAt: Date.now() });
       prompt.remove();
       this.effects.burst('💖', 12);
     };
 
     prompt.addEventListener('click', handlePromptTap);
-    prompt.addEventListener('touchend', handlePromptTap);
-
     document.body.appendChild(prompt);
   }
 
@@ -537,7 +666,7 @@ class LoveTunesApp {
   async resolveDirectUrl() {
     const url = this.elUrlInput?.value.trim();
     if (!url) {
-      this.showToast("Vui lòng dán link YouTube hoặc Spotify!");
+      this.showToast("Vui lòng dán link YouTube, Spotify hoặc MP3!");
       return;
     }
 
@@ -554,6 +683,7 @@ class LoveTunesApp {
       const data = await res.json();
 
       if (res.ok && data.track) {
+        this.player.unlockAudio();
         this.socket.emit('add_to_queue', { track: data.track });
         this.elUrlInput.value = '';
         this.showToast(`✨ Đã thêm: ${data.track.title}`);
@@ -586,7 +716,7 @@ class LoveTunesApp {
     }
 
     this.elQueueContainer.innerHTML = '';
-    this.queue.forEach((track, index) => {
+    this.queue.forEach((track) => {
       const item = document.createElement('div');
       item.className = 'song-item-card';
 
@@ -607,7 +737,7 @@ class LoveTunesApp {
       `;
 
       item.querySelector('.btn-play-now').addEventListener('click', () => {
-        this.socket.emit('play_track', { track });
+        this.playTrackNow(track);
       });
 
       item.querySelector('.btn-remove-queue').addEventListener('click', () => {
@@ -638,7 +768,7 @@ class LoveTunesApp {
     if (!this.elChatHistory) return;
 
     const bubble = document.createElement('div');
-    const isMine = msg.senderId === this.socket.id;
+    const isMine = (msg.senderClientId && msg.senderClientId === this.clientId) || msg.senderId === this.socket.id;
 
     if (msg.isSystem) {
       bubble.className = 'chat-bubble system';
@@ -668,7 +798,6 @@ class LoveTunesApp {
     this.elChatHistory.appendChild(bubble);
     if (autoScroll) {
       this.scrollChatToBottom();
-      // If sticker received from partner, trigger particle burst across screen!
       if (!isMine && msg.sticker?.emoji) {
         this.effects.burst(msg.sticker.emoji, 14);
       }
@@ -693,6 +822,13 @@ class LoveTunesApp {
       const pad = (n) => (n < 10 ? '0' : '') + n;
       this.elTogetherTimer.textContent = `${pad(hours)}:${pad(minutes)}:${pad(seconds)}`;
     }, 1000);
+  }
+
+  // Keep Render server awake while listening
+  startServerKeepAlive() {
+    setInterval(() => {
+      fetch('/api/ping').catch(() => {});
+    }, 180000);
   }
 
   // Profile Modal

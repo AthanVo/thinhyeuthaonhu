@@ -10,18 +10,25 @@ const io = new Server(server, {
   cors: {
     origin: '*',
     methods: ['GET', 'POST']
-  }
+  },
+  pingInterval: 10000,
+  pingTimeout: 20000,
+  transports: ['websocket', 'polling']
 });
 
 app.use(cors());
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+const DEFAULT_ROOM_ID = 'THINH-NHU';
+
 // Store active rooms in-memory
 const rooms = new Map();
+// Grace-period timers for mobile app-switching / quick page refreshes
+const disconnectTimers = new Map();
 
 function getOrCreateRoom(roomId) {
-  const normalizedId = roomId.trim().toUpperCase();
+  const normalizedId = (roomId || DEFAULT_ROOM_ID).trim().toUpperCase();
   if (!rooms.has(normalizedId)) {
     rooms.set(normalizedId, {
       id: normalizedId,
@@ -29,8 +36,9 @@ function getOrCreateRoom(roomId) {
       isPlaying: false,
       currentTime: 0,
       lastUpdate: Date.now(),
+      lastTrackEndAt: 0,
       queue: [],
-      users: new Map(),
+      users: new Map(), // key: socket.id -> user object
       chatMessages: [],
       createdAt: Date.now()
     });
@@ -39,14 +47,20 @@ function getOrCreateRoom(roomId) {
 }
 
 function calculateCurrentTime(room) {
+  if (!room.currentTrack) return 0;
   if (!room.isPlaying) {
-    return room.currentTime;
+    return room.currentTime || 0;
   }
-  const elapsedSec = (Date.now() - room.lastUpdate) / 1000;
-  return room.currentTime + elapsedSec;
+  const elapsedSec = Math.max(0, (Date.now() - room.lastUpdate) / 1000);
+  return (room.currentTime || 0) + elapsedSec;
 }
 
 // ----------------- API Endpoints -----------------
+
+// Keep-alive health check endpoint for Render
+app.get('/api/ping', (req, res) => {
+  res.json({ ok: true, serverTime: Date.now() });
+});
 
 // Helper: YouTube search without API key via initial data scrape
 async function searchYouTube(query) {
@@ -145,13 +159,14 @@ app.post('/api/resolve-url', async (req, res) => {
     const matchWatch = url.match(/[?&]v=([^&#]+)/);
     const matchShort = url.match(/youtu\.be\/([^?&#]+)/);
     const matchEmbed = url.match(/embed\/([^?&#]+)/);
+    const matchShorts = url.match(/shorts\/([^?&#]+)/);
 
     if (matchWatch) ytId = matchWatch[1];
     else if (matchShort) ytId = matchShort[1];
     else if (matchEmbed) ytId = matchEmbed[1];
+    else if (matchShorts) ytId = matchShorts[1];
 
     if (ytId) {
-      // Fetch details via search or oEmbed
       const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${ytId}&format=json`;
       const ytRes = await fetch(oembedUrl);
       let title = "YouTube Music";
@@ -178,7 +193,25 @@ app.post('/api/resolve-url', async (req, res) => {
       });
     }
 
-    return res.status(400).json({ error: 'Link không hợp lệ. Vui lòng dán link YouTube hoặc Spotify.' });
+    // 3. Check if Direct Audio URL (.mp3, .m4a, .aac, .ogg, .wav)
+    if (url.match(/\.(mp3|m4a|aac|ogg|wav)($|\?)/i)) {
+      const filename = url.split('/').pop().split('?')[0];
+      const cleanTitle = decodeURIComponent(filename).replace(/\.(mp3|m4a|aac|ogg|wav)/i, '').replace(/[-_]/g, ' ');
+      return res.json({
+        track: {
+          id: 'audio-' + Date.now(),
+          audioUrl: url,
+          title: cleanTitle || 'Giai Điệu Tình Yêu',
+          artist: 'Audio Trực Tiếp',
+          duration: 'MP3',
+          thumbnail: 'https://images.unsplash.com/photo-1518895949257-7621c3c786d7?w=500&auto=format&fit=crop&q=80',
+          source: 'audio',
+          originalUrl: url
+        }
+      });
+    }
+
+    return res.status(400).json({ error: 'Link không hợp lệ. Vui lòng dán link YouTube, Spotify hoặc link MP3 trực tiếp.' });
   } catch (err) {
     console.error("Resolve error:", err.message);
     res.status(500).json({ error: 'Có lỗi xảy ra khi xử lý liên kết.' });
@@ -190,21 +223,78 @@ app.post('/api/resolve-url', async (req, res) => {
 io.on('connection', (socket) => {
   let currentRoomId = null;
   let currentUser = null;
+  let currentClientId = null;
 
-  socket.on('join_room', ({ roomId, user }) => {
-    const room = getOrCreateRoom(roomId);
+  socket.on('join_room', ({ roomId, user, clientId }) => {
+    const room = getOrCreateRoom(roomId || DEFAULT_ROOM_ID);
+
+    // If switching from another room on the same socket, leave the old room
+    if (currentRoomId && currentRoomId !== room.id) {
+      const oldRoom = rooms.get(currentRoomId);
+      if (oldRoom) {
+        oldRoom.users.delete(socket.id);
+        socket.leave(currentRoomId);
+        io.to(oldRoom.id).emit('user_left', {
+          userId: socket.id,
+          user: currentUser,
+          users: Array.from(oldRoom.users.values())
+        });
+      }
+    }
+
     currentRoomId = room.id;
+    currentClientId = clientId || socket.id;
+
+    // Check if this client was recently connected (quick refresh or mobile network switch)
+    const timerKey = `${room.id}:${currentClientId}`;
+    let isReconnecting = false;
+    if (disconnectTimers.has(timerKey)) {
+      clearTimeout(disconnectTimers.get(timerKey));
+      disconnectTimers.delete(timerKey);
+      isReconnecting = true;
+    }
+
+    // Remove any stale socket entries from the same device (clientId)
+    for (const [existingSocketId, existingUser] of room.users.entries()) {
+      if (existingUser.clientId === currentClientId && existingSocketId !== socket.id) {
+        room.users.delete(existingSocketId);
+        isReconnecting = true;
+      }
+    }
+
+    // Smart role & default profile assignment so 2 people joining don't have duplicate default names
+    let resolvedNickname = user?.nickname || 'Anh Thịnh 🌸';
+    let resolvedAvatar = user?.avatar || '👑';
+    const isCustomProfile = Boolean(user?.isCustom);
+
+    const otherUsers = Array.from(room.users.values()).filter(u => u.clientId !== currentClientId);
+    if (!isCustomProfile && otherUsers.length > 0) {
+      const firstPartner = otherUsers[0];
+      if (firstPartner.nickname.includes('Thịnh') && resolvedNickname.includes('Thịnh')) {
+        resolvedNickname = 'Bé Thảo Như 💕';
+        resolvedAvatar = '🌸';
+      } else if (firstPartner.nickname.includes('Như') && resolvedNickname.includes('Như')) {
+        resolvedNickname = 'Anh Thịnh 🌸';
+        resolvedAvatar = '👑';
+      }
+    }
+
     currentUser = {
       id: socket.id,
-      nickname: user?.nickname || 'Người Thương',
-      avatar: user?.avatar || '🌸',
-      role: room.users.size === 0 ? 'host' : 'partner',
+      clientId: currentClientId,
+      nickname: resolvedNickname,
+      avatar: resolvedAvatar,
+      isCustom: isCustomProfile,
+      role: otherUsers.length === 0 ? 'host' : 'partner',
       color: user?.color || '#ff758f',
+      status: 'online',
       joinedAt: Date.now()
     };
 
     socket.join(room.id);
     room.users.set(socket.id, currentUser);
+
+    const allUsers = Array.from(room.users.values());
 
     // Send full current room state to joining user
     socket.emit('room_state', {
@@ -212,34 +302,43 @@ io.on('connection', (socket) => {
       currentTrack: room.currentTrack,
       isPlaying: room.isPlaying,
       currentTime: calculateCurrentTime(room),
+      serverTimestamp: Date.now(),
       queue: room.queue,
-      users: Array.from(room.users.values()),
+      users: allUsers,
       chatMessages: room.chatMessages.slice(-50),
       createdAt: room.createdAt,
       you: currentUser
     });
 
-    // Notify others in room
-    socket.to(room.id).emit('user_joined', {
-      user: currentUser,
-      users: Array.from(room.users.values())
-    });
+    if (isReconnecting) {
+      // Quietly update user list without spamming join toast/chat
+      socket.to(room.id).emit('users_updated', {
+        users: allUsers
+      });
+    } else {
+      // Notify others in room
+      socket.to(room.id).emit('user_joined', {
+        user: currentUser,
+        users: allUsers
+      });
 
-    // Send cute welcome system message to chat
-    const welcomeMsg = {
-      id: 'sys_' + Date.now(),
-      sender: 'LoveTunes 💕',
-      text: `${currentUser.nickname} vừa bước vào phòng cùng bạn! ✨`,
-      timestamp: Date.now(),
-      isSystem: true
-    };
-    room.chatMessages.push(welcomeMsg);
-    io.to(room.id).emit('chat_received', welcomeMsg);
+      // Send cute welcome system message to chat
+      const welcomeMsg = {
+        id: 'sys_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
+        sender: 'LoveTunes 💕',
+        text: `${currentUser.nickname} vừa bước vào phòng cùng bạn! ✨`,
+        timestamp: Date.now(),
+        isSystem: true
+      };
+      room.chatMessages.push(welcomeMsg);
+      if (room.chatMessages.length > 100) room.chatMessages.shift();
+      io.to(room.id).emit('chat_received', welcomeMsg);
+    }
   });
 
   // Play track (immediate change across room)
-  socket.on('play_track', ({ track }) => {
-    if (!currentRoomId) return;
+  socket.on('play_track', ({ track, alreadyLoaded }) => {
+    if (!currentRoomId || !track) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
@@ -248,49 +347,103 @@ io.on('connection', (socket) => {
     room.currentTime = 0;
     room.lastUpdate = Date.now();
 
-    io.to(room.id).emit('track_changed', {
+    const payload = {
       track: room.currentTrack,
       isPlaying: true,
       currentTime: 0,
+      senderId: socket.id,
+      alreadyLoaded: Boolean(alreadyLoaded),
       triggeredBy: currentUser?.nickname || 'Người Thương'
-    });
+    };
+
+    if (alreadyLoaded) {
+      socket.to(room.id).emit('track_changed', payload);
+    } else {
+      io.to(room.id).emit('track_changed', payload);
+    }
   });
 
-  // Play / Pause toggle
+  // Play / Pause toggle (broadcast only to partner to prevent echo feedback loop)
   socket.on('toggle_playback', ({ isPlaying, currentTime }) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
-    room.isPlaying = isPlaying;
-    room.currentTime = currentTime || calculateCurrentTime(room);
+    room.isPlaying = Boolean(isPlaying);
+    if (typeof currentTime === 'number' && !isNaN(currentTime) && currentTime >= 0) {
+      room.currentTime = currentTime;
+    } else {
+      room.currentTime = calculateCurrentTime(room);
+    }
     room.lastUpdate = Date.now();
 
-    io.to(room.id).emit('playback_sync', {
+    socket.to(room.id).emit('playback_sync', {
       isPlaying: room.isPlaying,
       currentTime: room.currentTime,
+      senderId: socket.id,
       triggeredBy: currentUser?.nickname || 'Người Thương'
     });
   });
 
-  // Seek time
+  // Seek time (broadcast only to partner to prevent echo feedback loop)
   socket.on('seek_track', ({ time }) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || typeof time !== 'number' || isNaN(time)) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
-    room.currentTime = time;
+    room.currentTime = Math.max(0, time);
     room.lastUpdate = Date.now();
 
-    io.to(room.id).emit('seek_sync', {
-      currentTime: time,
+    socket.to(room.id).emit('seek_sync', {
+      currentTime: room.currentTime,
+      senderId: socket.id,
       triggeredBy: currentUser?.nickname || 'Người Thương'
+    });
+  });
+
+  // Periodic heartbeat from active player for accurate drift correction & room state
+  socket.on('player_heartbeat', ({ trackId, currentTime, isPlaying, playerState }) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || !room.currentTrack) return;
+
+    if (room.currentTrack.id === trackId && isPlaying && typeof currentTime === 'number' && currentTime > 0) {
+      room.currentTime = currentTime;
+      room.lastUpdate = Date.now();
+      room.isPlaying = true;
+
+      socket.to(room.id).emit('partner_heartbeat', {
+        trackId,
+        currentTime,
+        isPlaying: true,
+        senderId: socket.id
+      });
+    }
+
+    if (currentUser && playerState) {
+      currentUser.status = playerState;
+      socket.to(room.id).emit('partner_status', {
+        userId: socket.id,
+        clientId: currentClientId,
+        status: playerState
+      });
+    }
+  });
+
+  // Explicit playback status update (playing, buffering, autoplay_blocked, paused)
+  socket.on('player_status', ({ status }) => {
+    if (!currentRoomId || !currentUser) return;
+    currentUser.status = status;
+    socket.to(currentRoomId).emit('partner_status', {
+      userId: socket.id,
+      clientId: currentClientId,
+      status
     });
   });
 
   // Add song to shared queue
   socket.on('add_to_queue', ({ track }) => {
-    if (!currentRoomId) return;
+    if (!currentRoomId || !track) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
@@ -312,6 +465,8 @@ io.on('connection', (socket) => {
         track: room.currentTrack,
         isPlaying: true,
         currentTime: 0,
+        senderId: socket.id,
+        alreadyLoaded: false,
         triggeredBy: currentUser?.nickname || 'Người Thương'
       });
       return;
@@ -334,37 +489,60 @@ io.on('connection', (socket) => {
     io.to(room.id).emit('queue_updated', { queue: room.queue });
   });
 
-  // Next track
-  socket.on('next_track', () => {
-    if (!currentRoomId) return;
-    const room = rooms.get(currentRoomId);
-    if (!room) return;
-
+  // Helper to advance room to next song
+  function advanceToNextTrack(room) {
     if (room.queue.length > 0) {
       const nextSong = room.queue.shift();
       room.currentTrack = nextSong;
       room.isPlaying = true;
       room.currentTime = 0;
       room.lastUpdate = Date.now();
+      room.lastTrackEndAt = Date.now();
 
       io.to(room.id).emit('track_changed', {
         track: room.currentTrack,
         isPlaying: true,
         currentTime: 0,
-        triggeredBy: currentUser?.nickname || 'Người Thương'
+        triggeredBy: currentUser?.nickname || 'LoveTunes 💕'
       });
       io.to(room.id).emit('queue_updated', { queue: room.queue });
     } else {
       room.isPlaying = false;
+      room.currentTime = 0;
+      room.lastUpdate = Date.now();
       io.to(room.id).emit('playback_sync', {
         isPlaying: false,
         currentTime: 0
       });
     }
+  }
+
+  // Natural track end (deduplicated so 2 clients finishing together don't skip 2 songs)
+  socket.on('track_ended', ({ trackId }) => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room || !room.currentTrack) return;
+
+    // Ignore if room already moved to another track or ended within last 3 seconds
+    if (trackId && room.currentTrack.id !== trackId) return;
+    if (Date.now() - (room.lastTrackEndAt || 0) < 3000) return;
+
+    advanceToNextTrack(room);
   });
 
-  // Sync request from client (e.g. click "Đồng bộ tức thì")
-  socket.on('request_sync', () => {
+  // Manual Next track button click
+  socket.on('next_track', () => {
+    if (!currentRoomId) return;
+    const room = rooms.get(currentRoomId);
+    if (!room) return;
+
+    // Short 800ms debounce against accidental double clicks
+    if (Date.now() - (room.lastTrackEndAt || 0) < 800) return;
+    advanceToNextTrack(room);
+  });
+
+  // Sync request from client (e.g. click "Đồng bộ tức thì" or onPlayerReady)
+  socket.on('request_sync', (data) => {
     if (!currentRoomId) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
@@ -373,6 +551,7 @@ io.on('connection', (socket) => {
       currentTrack: room.currentTrack,
       isPlaying: room.isPlaying,
       currentTime: calculateCurrentTime(room),
+      clientSentAt: data?.clientSentAt || null,
       serverTimestamp: Date.now()
     });
   });
@@ -384,6 +563,7 @@ io.on('connection', (socket) => {
       emoji: emoji || '💖',
       count: count || 1,
       sender: currentUser?.nickname || 'Người Thương',
+      senderId: socket.id,
       position: position || { x: Math.random() * 80 + 10, y: 90 }
     });
   });
@@ -397,6 +577,7 @@ io.on('connection', (socket) => {
     const chatItem = {
       id: 'msg_' + Date.now() + '_' + Math.random().toString(36).substr(2, 4),
       senderId: socket.id,
+      senderClientId: currentClientId,
       sender: currentUser?.nickname || 'Người Thương',
       avatar: currentUser?.avatar || '💖',
       text: message ? message.trim() : '',
@@ -411,13 +592,14 @@ io.on('connection', (socket) => {
   });
 
   // Profile update (name/avatar change)
-  socket.on('update_profile', ({ nickname, avatar }) => {
+  socket.on('update_profile', ({ nickname, avatar, isCustom }) => {
     if (!currentRoomId || !currentUser) return;
     const room = rooms.get(currentRoomId);
     if (!room) return;
 
     if (nickname) currentUser.nickname = nickname.trim();
     if (avatar) currentUser.avatar = avatar;
+    if (isCustom !== undefined) currentUser.isCustom = Boolean(isCustom);
     room.users.set(socket.id, currentUser);
 
     io.to(room.id).emit('users_updated', {
@@ -425,23 +607,32 @@ io.on('connection', (socket) => {
     });
   });
 
-  // Disconnect
+  // Disconnect with grace period for mobile app-switching / page reload
   socket.on('disconnect', () => {
-    if (currentRoomId && rooms.has(currentRoomId)) {
-      const room = rooms.get(currentRoomId);
-      room.users.delete(socket.id);
+    if (!currentRoomId || !rooms.has(currentRoomId)) return;
+    const room = rooms.get(currentRoomId);
+    const departingUser = currentUser;
+    const departingSocketId = socket.id;
+    const departingClientId = currentClientId;
 
-      io.to(room.id).emit('user_left', {
-        userId: socket.id,
-        user: currentUser,
-        users: Array.from(room.users.values())
-      });
+    room.users.delete(departingSocketId);
 
-      // If room empty for over 2 hours, can clean up
-      if (room.users.size === 0) {
-        // keep room for later reconnects
+    // Wait 4 seconds before announcing departure in case the user is just refreshing or reconnecting
+    const timerKey = `${room.id}:${departingClientId}`;
+    const timer = setTimeout(() => {
+      disconnectTimers.delete(timerKey);
+      // Check if user reconnected with another socket using same clientId
+      const stillInRoom = Array.from(room.users.values()).some(u => u.clientId === departingClientId);
+      if (!stillInRoom) {
+        io.to(room.id).emit('user_left', {
+          userId: departingSocketId,
+          user: departingUser,
+          users: Array.from(room.users.values())
+        });
       }
-    }
+    }, 4000);
+
+    disconnectTimers.set(timerKey, timer);
   });
 });
 

@@ -39,6 +39,10 @@
   -webkit-font-smoothing: antialiased;
 }
 
+button, .song-item-card, .room-chip, .avatar-bubble, .seek-slider-container {
+  touch-action: manipulation;
+}
+
 body {
   font-family: 'Be Vietnam Pro', 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
   background: var(--bg-gradient);
@@ -414,23 +418,37 @@ body {
   flex-shrink: 0;
 }
 
-.btn-pip-mode {
+.btn-pocket-mode {
   padding: 6px 12px;
   font-size: 12px;
-  background: #fff0f3;
-  border-color: #ffccd5;
-  color: #ff3360;
+  background: #1f1b24;
+  border-color: #3d3247;
+  color: #ff99ac;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
 }
 
-.btn-pip-mode:hover {
-  background: #ffe3e8;
+.btn-pocket-mode:hover {
+  background: #2a2233;
   border-color: #ff5277;
-  color: #d90429;
+  color: #fff;
 }
 
 .btn-toggle-view {
   padding: 6px 12px;
   font-size: 12px;
+}
+
+.btn-help-multitask {
+  padding: 6px 10px;
+  font-size: 12px;
+  background: #fff8f9;
+  border-color: #ffd6e0;
+  color: #ff3360;
+}
+
+.btn-help-multitask:hover {
+  background: #ffe6ec;
+  border-color: #ff5277;
 }
 
 /* Turntable / Vinyl Showcase */
@@ -1801,4 +1819,152 @@ body {
   .interactions-container-glass {
     height: 520px;
   }
+}
+
+/* ============================================================
+   🌙 OLED POCKET MODE SCREEN SAVER (0% Display Battery, Touch-Lock)
+   ============================================================ */
+.oled-pocket-overlay {
+  position: fixed;
+  inset: 0;
+  background: #000000;
+  z-index: 999999;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  user-select: none;
+  touch-action: manipulation;
+  color: #fff;
+  transition: opacity 0.3s ease, visibility 0.3s ease;
+}
+
+.oled-pocket-overlay.hidden {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.oled-pocket-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  padding: 24px;
+  max-width: 380px;
+  animation: fadeIn 0.4s ease;
+}
+
+.oled-heart-pulse {
+  font-size: 52px;
+  color: #ff3360;
+  margin-bottom: 12px;
+  animation: heartPulse 2s infinite ease-in-out;
+  text-shadow: 0 0 25px rgba(255, 51, 96, 0.6);
+}
+
+.oled-song-title {
+  font-size: 20px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.9);
+  margin-bottom: 6px;
+  line-height: 1.3;
+}
+
+.oled-song-artist {
+  font-size: 14px;
+  color: #ff85a2;
+  margin-bottom: 24px;
+}
+
+.oled-clock {
+  font-size: 44px;
+  font-weight: 200;
+  letter-spacing: 2px;
+  color: rgba(255, 255, 255, 0.85);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 28px;
+}
+
+.oled-badge {
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: var(--radius-lg);
+  padding: 14px 18px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: rgba(255, 255, 255, 0.6);
+  margin-bottom: 32px;
+}
+
+.oled-badge span {
+  display: block;
+  font-weight: 600;
+  color: #ffccd5;
+  margin-bottom: 4px;
+}
+
+.oled-wake-button {
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  color: rgba(255, 255, 255, 0.85);
+  padding: 12px 24px;
+  border-radius: var(--radius-full);
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.oled-wake-button:hover,
+.oled-wake-button:active {
+  background: rgba(255, 51, 96, 0.2);
+  border-color: #ff3360;
+  color: #fff;
+}
+
+/* ============================================================
+   💡 MULTITASK HELP MODAL STYLING
+   ============================================================ */
+.modal-help-card {
+  max-width: 480px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.help-scroll-content {
+  overflow-y: auto;
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding-right: 4px;
+}
+
+.help-item-card {
+  background: white;
+  border: 1px solid var(--pink-border);
+  border-radius: var(--radius-md);
+  padding: 14px 16px;
+  text-align: left;
+}
+
+.help-item-card.highlight {
+  background: #fff0f3;
+  border-color: #ffb3c1;
+}
+
+.help-item-title {
+  font-weight: 700;
+  font-size: 14px;
+  color: var(--primary-pink);
+  margin-bottom: 8px;
+}
+
+.help-item-card p {
+  font-size: 13px;
+  color: var(--text-secondary);
+  line-height: 1.5;
+  margin: 4px 0;
 }
