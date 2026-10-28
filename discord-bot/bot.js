@@ -1,6 +1,7 @@
 const path = require('path');
 const fs = require('fs');
 const { spawn, execFile } = require('child_process');
+const { PassThrough } = require('stream');
 
 // Load .env from discord-bot/.env or root .env
 require('dotenv').config({ path: path.join(__dirname, '.env') });
@@ -14,6 +15,9 @@ const {
   ButtonBuilder,
   ButtonStyle,
   StringSelectMenuBuilder,
+  ModalBuilder,
+  TextInputBuilder,
+  TextInputStyle,
   REST,
   Routes,
   SlashCommandBuilder
@@ -58,6 +62,8 @@ function resolveFfmpegBinary() {
 function resolveYtDlpBinary() {
   const candidates = [
     process.env.YTDLP_PATH,
+    path.join(process.env.APPDATA || '', 'Python', 'Python313', 'Scripts', 'yt-dlp.exe'),
+    'C:\\Users\\thinh.vo\\AppData\\Roaming\\Python\\Python313\\Scripts\\yt-dlp.exe',
     'C:\\Python313\\Scripts\\yt-dlp.exe',
     'C:\\Python312\\Scripts\\yt-dlp.exe',
     'C:\\Python311\\Scripts\\yt-dlp.exe',
@@ -81,8 +87,7 @@ const client = new Client({
   intents: [
     GatewayIntentBits.Guilds,
     GatewayIntentBits.GuildVoiceStates,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent
+    GatewayIntentBits.GuildMessages
   ]
 });
 
@@ -106,16 +111,20 @@ function getOrCreateGuildQueue(guildId) {
       guildId,
       connection: null,
       player,
+      ytdlpProcess: null,
       ffmpegProcess: null,
       currentResource: null,
       textChannel: null,
       nowPlayingMsg: null,
       currentTrack: null,
+      trackStartedAt: 0,
+      consecutiveErrors: 0,
+      isTransitioning: false,
       queue: [],
       historyIds: [],
       volume: 0.85,
       loopMode: 'off', // 'off' | 'track' | 'queue'
-      autoRadio: true,
+      autoRadio: false,
       syncWithWebRoom: true,
       isPaused: false
     });
@@ -123,21 +132,162 @@ function getOrCreateGuildQueue(guildId) {
   return guildQueues.get(guildId);
 }
 
-// ----------------- LoveTunes API Client (thinhyeuthaonhu.onrender.com) -----------------
+// ----------------- LoveTunes API Client & Fast YouTube Search Engine -----------------
 
-async function apiSearchMusic(query, limit = 10) {
-  const res = await fetch(`${API_BASE}/api/bot/search?q=${encodeURIComponent(query)}&limit=${limit}`);
-  return await res.json();
+const autocompleteCache = new Map(); // query -> { choices, expiresAt }
+
+function safeTruncate(str, maxChars = 95) {
+  const chars = Array.from(str || '');
+  if (chars.length <= maxChars) return chars.join('');
+  return chars.slice(0, maxChars - 1).join('') + '…';
 }
 
-async function apiAutocomplete(query) {
+async function fastYouTubeInnertubeSearch(query, limit = 8) {
   try {
-    const res = await fetch(`${API_BASE}/api/bot/autocomplete?q=${encodeURIComponent(query)}`);
+    const res = await fetch('https://www.youtube.com/youtubei/v1/search?prettyPrint=false', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        query,
+        context: {
+          client: {
+            clientName: 'WEB',
+            clientVersion: '2.20250101.00.00',
+            hl: 'vi',
+            gl: 'VN'
+          }
+        }
+      }),
+      signal: AbortSignal.timeout(1600)
+    });
     const data = await res.json();
-    return data.choices || [];
+    const sections = data.contents?.twoColumnSearchResultsRenderer?.primaryContents?.sectionListRenderer?.contents || [];
+    const results = [];
+    for (const s of sections) {
+      for (const item of (s.itemSectionRenderer?.contents || [])) {
+        const v = item.videoRenderer;
+        if (v?.videoId) {
+          const title = v.title?.runs?.map(r => r.text).join('') || 'YouTube Video';
+          const artist = v.ownerText?.runs?.[0]?.text || v.longBylineText?.runs?.[0]?.text || 'YouTube';
+          const duration = v.lengthText?.simpleText || 'LIVE';
+          const views = v.shortViewCountText?.simpleText || '';
+          const thumbnail = v.thumbnail?.thumbnails?.slice(-1)[0]?.url || `https://i.ytimg.com/vi/${v.videoId}/hqdefault.jpg`;
+          results.push({
+            id: v.videoId,
+            title,
+            artist,
+            duration,
+            views,
+            thumbnail,
+            url: `https://www.youtube.com/watch?v=${v.videoId}`,
+            source: 'youtube'
+          });
+          if (results.length >= limit) break;
+        }
+      }
+      if (results.length >= limit) break;
+    }
+    return results;
   } catch (e) {
     return [];
   }
+}
+
+async function apiSearchMusic(query, limit = 10) {
+  try {
+    const res = await fetch(`${API_BASE}/api/bot/search?q=${encodeURIComponent(query)}&limit=${limit}`, {
+      signal: AbortSignal.timeout(3500)
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.ok && (data.track || data.results?.length)) return data;
+    }
+  } catch (e) {}
+
+  // Instant fallback to direct YouTube Innertube search if Render is cold-booting
+  const results = await fastYouTubeInnertubeSearch(query, limit);
+  return {
+    ok: results.length > 0,
+    type: 'search',
+    track: results[0] || null,
+    results
+  };
+}
+
+async function apiAutocomplete(rawQuery, filterType = '') {
+  const q = (rawQuery || '').trim();
+  const filterSuffixMap = {
+    music: ' official audio nhạc',
+    mv: ' official mv video',
+    lofi: ' lofi chill',
+    remix: ' remix tiktok',
+    karaoke: ' karaoke beat',
+    live: ' live acoustic'
+  };
+  const suffix = filterSuffixMap[filterType] || '';
+  const effectiveQuery = q ? `${q}${suffix}` : '';
+
+  if (!effectiveQuery) {
+    return [
+      { name: '🎵 [04:20] Nơi Này Có Anh — Sơn Tùng M-TP', value: 'https://www.youtube.com/watch?v=FN7ALfpGxiI' },
+      { name: '🎵 [04:09] Chúng Ta Của Tương Lai — Sơn Tùng M-TP', value: 'https://www.youtube.com/watch?v=abPmZCZZrFA' },
+      { name: '🔎 Gợi ý: Nhạc trẻ tình yêu chill hay nhất', value: 'nhạc trẻ tình yêu chill hay nhất' },
+      { name: '🔎 Gợi ý: Lofi tiếng mưa học bài nhẹ nhàng', value: 'lofi tiếng mưa học bài nhẹ nhàng' },
+      { name: '🔎 Gợi ý: Nhạc Remix TikTok thịnh hành 2026', value: 'nhạc remix tiktok thịnh hành 2026' }
+    ];
+  }
+
+  const cacheKey = `${effectiveQuery.toLowerCase()}`;
+  const cached = autocompleteCache.get(cacheKey);
+  if (cached && Date.now() < cached.expiresAt) {
+    return cached.choices;
+  }
+
+  const suggestPromise = fetch(
+    `https://suggestqueries.google.com/complete/search?client=firefox&ds=yt&hl=vi&q=${encodeURIComponent(effectiveQuery)}`,
+    { signal: AbortSignal.timeout(1000) }
+  )
+    .then(r => r.json())
+    .then(d => (Array.isArray(d?.[1]) ? d[1].slice(0, 4) : []))
+    .catch(() => []);
+
+  const videoPromise = fastYouTubeInnertubeSearch(effectiveQuery, 7);
+
+  const [suggestions, videos] = await Promise.all([suggestPromise, videoPromise]);
+  const choices = [];
+
+  // 1. Real YouTube Videos with [Duration] + Title + Channel
+  for (const v of videos) {
+    const label = safeTruncate(`🎵 [${v.duration}] ${v.title} — ${v.artist}`, 95);
+    choices.push({
+      name: label,
+      value: `https://www.youtube.com/watch?v=${v.id}`
+    });
+  }
+
+  // 2. YouTube Search Keyword Suggestions
+  for (const s of suggestions) {
+    if (choices.length >= 10) break;
+    const label = safeTruncate(`🔎 Tìm trên YouTube: ${s}`, 95);
+    const val = safeTruncate(s, 95);
+    if (val) {
+      choices.push({ name: label, value: val });
+    }
+  }
+
+  if (choices.length === 0) {
+    choices.push({
+      name: safeTruncate(`🔎 Tìm kiếm YouTube: ${effectiveQuery}`, 95),
+      value: safeTruncate(effectiveQuery, 95)
+    });
+  }
+
+  const finalChoices = choices.slice(0, 10);
+  autocompleteCache.set(cacheKey, {
+    choices: finalChoices,
+    expiresAt: Date.now() + 10 * 60 * 1000
+  });
+  return finalChoices;
 }
 
 async function apiGetRelated(track) {
@@ -279,20 +429,20 @@ async function extractViaLoveTunesApi(videoId) {
   }
 }
 
-// Layer 3: Local yt-dlp CLI fallback
+// Primary Resolver: yt-dlp 2026.10.26 with Node JS challenge solver (--js-runtimes node)
 function extractViaYtDlp(videoUrl) {
   return new Promise((resolve) => {
     execFile(
       YTDLP_BIN,
       [
-        '--extractor-args', 'youtube:player_client=android_vr',
+        '--js-runtimes', 'node',
         '-f', 'bestaudio[acodec=opus]/bestaudio/best',
         '-g',
         '--no-playlist',
         '--no-warnings',
         videoUrl
       ],
-      { timeout: 12000 },
+      { timeout: 15000 },
       (err, stdout) => {
         if (err || !stdout) return resolve(null);
         const line = stdout.trim().split(/\r?\n/)[0];
@@ -319,17 +469,12 @@ async function resolveDirectAudioUrl(track) {
 
   const videoUrl = track.url || `https://www.youtube.com/watch?v=${videoId}`;
 
-  // Try Layer 1 (Direct Innertube ANDROID_VR ~350ms)
-  let directUrl = videoId ? await extractDirectInnertubeUrl(videoId) : null;
+  // 1. Primary: yt-dlp 2026.10.26 with --js-runtimes node (solves YouTube n-challenge so FFmpeg never gets 403!)
+  let directUrl = await extractViaYtDlp(videoUrl);
 
-  // Try Layer 2 (LoveTunes API /api/bot/stream)
+  // 2. Fallback: LoveTunes API /api/bot/stream
   if (!directUrl && videoId) {
     directUrl = await extractViaLoveTunesApi(videoId);
-  }
-
-  // Try Layer 3 (yt-dlp CLI)
-  if (!directUrl) {
-    directUrl = await extractViaYtDlp(videoUrl);
   }
 
   if (directUrl && videoId) {
@@ -351,6 +496,12 @@ function prefetchNextTrack(state) {
 }
 
 function killActiveFfmpeg(state) {
+  if (state.ytdlpProcess) {
+    try {
+      state.ytdlpProcess.kill('SIGKILL');
+    } catch (e) {}
+    state.ytdlpProcess = null;
+  }
   if (state.ffmpegProcess) {
     try {
       state.ffmpegProcess.kill('SIGKILL');
@@ -362,56 +513,104 @@ function killActiveFfmpeg(state) {
 async function createSmoothAudioResource(state, track) {
   killActiveFfmpeg(state);
 
-  const directUrl = await resolveDirectAudioUrl(track);
-  if (directUrl) {
-    const ffmpegArgs = [
-      '-reconnect', '1',
-      '-reconnect_streamed', '1',
-      '-reconnect_delay_max', '5',
-      '-i', directUrl,
-      '-analyzeduration', '0',
-      '-loglevel', '0',
-      '-vn',
-      '-f', 's16le',
-      '-ar', '48000',
-      '-ac', '2',
-      'pipe:1'
-    ];
+  const videoUrl = track.audioUrl || track.url || `https://www.youtube.com/watch?v=${track.id}`;
 
-    const ffmpegProc = spawn(FFMPEG_BIN, ffmpegArgs, {
-      windowsHide: true,
-      stdio: ['ignore', 'pipe', 'ignore']
-    });
+  return new Promise((resolve, reject) => {
+    const pcmStream = new PassThrough({ highWaterMark: 1 << 20 });
+    let bufferedBytes = 0;
+    let resolved = false;
+
+    const timeout = setTimeout(() => {
+      if (!resolved) {
+        resolved = true;
+        killActiveFfmpeg(state);
+        reject(new Error('Stream timeout waiting for audio bytes'));
+      }
+    }, 15000);
+
+    // Pipe yt-dlp (with --js-runtimes node) -> FFmpeg -> PassThrough PCM
+    const ytdlpProc = spawn(
+      YTDLP_BIN,
+      [
+        '--js-runtimes', 'node',
+        '-f', 'bestaudio[acodec=opus]/bestaudio/best',
+        '--no-playlist',
+        '--no-warnings',
+        '-o', '-',
+        videoUrl
+      ],
+      {
+        windowsHide: true,
+        stdio: ['ignore', 'pipe', 'ignore']
+      }
+    );
+
+    const ffmpegProc = spawn(
+      FFMPEG_BIN,
+      [
+        '-i', 'pipe:0',
+        '-analyzeduration', '0',
+        '-loglevel', '0',
+        '-vn',
+        '-f', 's16le',
+        '-ar', '48000',
+        '-ac', '2',
+        'pipe:1'
+      ],
+      {
+        windowsHide: true,
+        stdio: ['pipe', 'pipe', 'ignore']
+      }
+    );
+
+    state.ytdlpProcess = ytdlpProc;
     state.ffmpegProcess = ffmpegProc;
 
-    const resource = createAudioResource(ffmpegProc.stdout, {
-      inputType: StreamType.Raw,
-      inlineVolume: true
-    });
-    resource.volume?.setVolume(state.volume);
-    state.currentResource = resource;
-    return resource;
-  }
+    ytdlpProc.stdout.pipe(ffmpegProc.stdin);
+    ffmpegProc.stdin.on('error', () => {});
+    ytdlpProc.stdout.on('error', () => {});
 
-  // Layer 4: Final fallback via @distube/ytdl-core
-  const videoUrl = track.url || `https://www.youtube.com/watch?v=${track.id}`;
-  const ytdlStream = ytdl(videoUrl, {
-    filter: 'audioonly',
-    quality: 'highestaudio',
-    highWaterMark: 1 << 25
+    ffmpegProc.stdout.on('data', (chunk) => {
+      pcmStream.write(chunk);
+      if (!resolved) {
+        bufferedBytes += chunk.length;
+        // Wait until at least 32KB (~0.17s) of real decoded PCM audio is ready before resolving!
+        if (bufferedBytes >= 32768) {
+          resolved = true;
+          clearTimeout(timeout);
+          const resource = createAudioResource(pcmStream, {
+            inputType: StreamType.Raw,
+            inlineVolume: true
+          });
+          resource.volume?.setVolume(state.volume);
+          state.currentResource = resource;
+          resolve(resource);
+        }
+      }
+    });
+
+    ffmpegProc.stdout.on('end', () => {
+      pcmStream.end();
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        reject(new Error('FFmpeg exited before producing audio bytes'));
+      }
+    });
+
+    ffmpegProc.on('error', (err) => {
+      if (!resolved) {
+        resolved = true;
+        clearTimeout(timeout);
+        reject(err);
+      }
+    });
   });
-  const resource = createAudioResource(ytdlStream, {
-    inputType: StreamType.Arbitrary,
-    inlineVolume: true
-  });
-  resource.volume?.setVolume(state.volume);
-  state.currentResource = resource;
-  return resource;
 }
 
 // ----------------- UI Builders (Embeds, Buttons, Dropdowns) -----------------
 
-function buildPlayerControlRows(state) {
+function buildPlayerControlRows(state, suggestedTracks = []) {
   const loopLabels = {
     off: '🔁 Lặp: Tắt',
     track: '🔂 Lặp: 1 Bài',
@@ -420,9 +619,13 @@ function buildPlayerControlRows(state) {
 
   const row1 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
+      .setCustomId('btn_open_search_modal')
+      .setLabel('🔍 Tìm kiếm YouTube')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
       .setCustomId('btn_toggle')
       .setLabel(state.isPaused ? '▶️ Tiếp tục' : '⏸️ Tạm dừng')
-      .setStyle(state.isPaused ? ButtonStyle.Success : ButtonStyle.Primary),
+      .setStyle(state.isPaused ? ButtonStyle.Success : ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_skip')
       .setLabel('⏭️ Bài tiếp')
@@ -432,10 +635,6 @@ function buildPlayerControlRows(state) {
       .setLabel(loopLabels[state.loopMode] || '🔁 Lặp: Tắt')
       .setStyle(state.loopMode !== 'off' ? ButtonStyle.Success : ButtonStyle.Secondary),
     new ButtonBuilder()
-      .setCustomId('btn_autoplay')
-      .setLabel(state.autoRadio ? '📻 Radio: Bật' : '📻 Radio: Tắt')
-      .setStyle(state.autoRadio ? ButtonStyle.Success : ButtonStyle.Secondary),
-    new ButtonBuilder()
       .setCustomId('btn_stop')
       .setLabel('🛑 Dừng')
       .setStyle(ButtonStyle.Danger)
@@ -443,12 +642,12 @@ function buildPlayerControlRows(state) {
 
   const row2 = new ActionRowBuilder().addComponents(
     new ButtonBuilder()
+      .setCustomId('btn_autoplay')
+      .setLabel(state.autoRadio ? '📻 Radio: Bật' : '📻 Radio: Tắt')
+      .setStyle(state.autoRadio ? ButtonStyle.Success : ButtonStyle.Secondary),
+    new ButtonBuilder()
       .setCustomId('btn_lyrics')
       .setLabel('🎤 Lời bài hát')
-      .setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder()
-      .setCustomId('btn_queue')
-      .setLabel(`📜 Hàng đợi (${state.queue.length})`)
       .setStyle(ButtonStyle.Secondary),
     new ButtonBuilder()
       .setCustomId('btn_vol_down')
@@ -464,7 +663,94 @@ function buildPlayerControlRows(state) {
       .setURL(`${API_BASE}/?room=${DEFAULT_ROOM}`)
   );
 
-  return [row1, row2];
+  const rows = [row1, row2];
+
+  // Row 3: Just like YouTube's Right Sidebar / Search Results! Pick any video in 1 click!
+  const list = Array.isArray(suggestedTracks) && suggestedTracks.length > 0
+    ? suggestedTracks.slice(0, 10)
+    : (state.lastSearchResults || []).slice(0, 10);
+
+  if (list.length > 0) {
+    const selectMenu = new StringSelectMenuBuilder()
+      .setCustomId('select_youtube_instant_play')
+      .setPlaceholder('📺 Chọn nhanh Video khác / Video đề xuất từ YouTube...')
+      .addOptions(
+        list.map((t, i) => ({
+          label: safeTruncate(`${i + 1}. ${t.title}`, 92),
+          description: safeTruncate(`${t.artist || 'YouTube'} • ⏱️ ${t.duration || 'LIVE'}`, 92),
+          value: t.id
+        }))
+      );
+    rows.push(new ActionRowBuilder().addComponents(selectMenu));
+  }
+
+  return rows;
+}
+
+function buildYouTubeHomeCard() {
+  const embed = new EmbedBuilder()
+    .setColor('#ff0033')
+    .setAuthor({
+      name: '📺 YouTube Music & Video Hub — LoveTunes Thịnh & Như',
+      url: `${API_BASE}/?room=${DEFAULT_ROOM}`
+    })
+    .setTitle('🎶 Bấm nút [🔍 Tìm kiếm YouTube] bên dưới để tìm & phát bất kỳ video/nhạc nào!')
+    .setDescription(
+      '✨ **Cách dùng dễ nhất (Y hệt YouTube):**\n' +
+      '1️⃣ Bấm nút **🔍 Tìm kiếm YouTube** màu xanh bên dưới ➡️ Gõ tên bài hát, vlog, ca sĩ hoặc dán link YouTube ➡️ Chọn video muốn phát!\n' +
+      '2️⃣ Hoặc bấm chọn nhanh các **Chủ đề Thịnh Hành** bên dưới để hiện danh sách Top 10 video YouTube mới nhất.\n' +
+      '3️⃣ Hoặc gõ `/play` (vừa gõ chữ là hiện ngay danh sách Video YouTube để bấm chọn).'
+    )
+    .setFooter({ text: `Đồng bộ trực tiếp với Phòng Đôi: ${API_BASE}/?room=${DEFAULT_ROOM}` });
+
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder()
+      .setCustomId('btn_open_search_modal')
+      .setLabel('🔍 Tìm kiếm YouTube')
+      .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder()
+      .setCustomId('btn_cat_vpop')
+      .setLabel('🔥 Nhạc Trẻ Hot')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('btn_cat_lofi')
+      .setLabel('🌧️ Lofi Chill')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('btn_cat_remix')
+      .setLabel('💃 Remix TikTok')
+      .setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder()
+      .setCustomId('btn_cat_couple')
+      .setLabel('💕 Nhạc Đôi Tình Yêu')
+      .setStyle(ButtonStyle.Success)
+  );
+
+  const categoryMenu = new StringSelectMenuBuilder()
+    .setCustomId('select_youtube_category')
+    .setPlaceholder('📂 Khám phá Chủ đề YouTube (Bấm để xem Top 10 Video)...')
+    .addOptions([
+      { label: '🔥 Top Xu Hướng Âm Nhạc Việt Nam 2026', description: 'Những bản hit V-Pop triệu view đang thịnh hành', value: 'nhạc trẻ việt nam hot nhất hiện nay official' },
+      { label: '💕 Nhạc Tình Yêu Ngọt Ngào (Thịnh & Thảo Như)', description: 'Tuyển tập nhạc đôi lãng mạn nghe cùng người thương', value: 'nhạc tình yêu đôi lứa ngọt ngào lãng mạn' },
+      { label: '🌧️ Lofi Tiếng Mưa Học Bài & Thư Giãn', description: 'Nhạc Lofi chill nhẹ nhàng không lời / V-Pop lofi', value: 'lofi chill tiếng mưa học bài thư giãn' },
+      { label: '💃 Nhạc Remix TikTok & Vinahouse Sôi Động', description: 'Nhạc nền TikTok cuốn nhất', value: 'nhạc remix tiktok thịnh hành hay nhất' },
+      { label: '🎬 Vlog Ẩm Thực & Du Lịch Thịnh Hành', description: 'Các video vlog giải trí, ăn uống, du lịch mới nhất', value: 'vlog ẩm thực du lịch việt nam mới nhất' },
+      { label: '🎤 Nhạc Acoustic & Live Band Mộc Mạc', description: 'Những bản cover acoustic nhẹ nhàng sâu lắng', value: 'nhạc acoustic cover nhẹ nhàng sâu lắng' },
+      { label: '🌏 US-UK & K-Pop Hits', description: 'Nhạc quốc tế được yêu thích nhất', value: 'top us uk pop songs hits' }
+    ]);
+
+  const row2 = new ActionRowBuilder().addComponents(categoryMenu);
+  return { embeds: [embed], components: [row1, row2] };
+}
+
+function findBestVoiceChannel(guild, member) {
+  if (member?.voice?.channel) return member.voice.channel;
+  // Automatically find voice channel with human members, or 'Chung', or first voice channel!
+  const withHumans = guild.channels.cache.find(c => c.isVoiceBased() && c.members.some(m => !m.user.bot));
+  if (withHumans) return withHumans;
+  const chungChannel = guild.channels.cache.find(c => c.isVoiceBased() && /chung|music|nhạc|voice/i.test(c.name));
+  if (chungChannel) return chungChannel;
+  return guild.channels.cache.find(c => c.isVoiceBased()) || null;
 }
 
 function buildNowPlayingEmbed(state, track) {
@@ -499,22 +785,25 @@ function buildNowPlayingEmbed(state, track) {
 
 async function playNextInGuild(guildId, forceSkipLoopTrack = false) {
   const state = guildQueues.get(guildId);
-  if (!state || !state.connection) return;
+  if (!state || !state.connection || state.isTransitioning) return;
 
+  state.isTransitioning = true;
   killActiveFfmpeg(state);
   let nextTrack = null;
 
-  if (!forceSkipLoopTrack && state.loopMode === 'track' && state.currentTrack) {
+  const playedDurationMs = state.trackStartedAt ? (Date.now() - state.trackStartedAt) : 0;
+
+  if (!forceSkipLoopTrack && state.loopMode === 'track' && state.currentTrack && playedDurationMs > 5000) {
     nextTrack = { ...state.currentTrack };
   } else {
-    if (state.loopMode === 'queue' && state.currentTrack) {
+    if (state.loopMode === 'queue' && state.currentTrack && playedDurationMs > 5000) {
       state.queue.push({ ...state.currentTrack });
     }
     nextTrack = state.queue.shift();
   }
 
-  // Auto-Radio via LoveTunes API if queue is empty
-  if (!nextTrack && state.autoRadio && state.currentTrack) {
+  // Auto-Radio ONLY if queue is empty, autoRadio is ON, and previous song actually played >= 20 seconds!
+  if (!nextTrack && state.autoRadio && state.currentTrack && playedDurationMs >= 20000 && state.consecutiveErrors === 0) {
     try {
       const related = await apiGetRelated(state.currentTrack);
       const candidate = related.find(t => !state.historyIds.includes(t.id)) || related[0];
@@ -527,6 +816,7 @@ async function playNextInGuild(guildId, forceSkipLoopTrack = false) {
   if (!nextTrack) {
     state.currentTrack = null;
     state.isPaused = false;
+    state.isTransitioning = false;
     return;
   }
 
@@ -538,11 +828,13 @@ async function playNextInGuild(guildId, forceSkipLoopTrack = false) {
     if (state.historyIds.length > 40) state.historyIds.shift();
   }
 
-  // Pre-resolve the upcoming song in the background
-  prefetchNextTrack(state);
-
   try {
+    // Wait until real decoded PCM audio bytes arrive BEFORE playing & sending message!
     const resource = await createSmoothAudioResource(state, nextTrack);
+    state.trackStartedAt = Date.now();
+    state.consecutiveErrors = 0;
+    state.isTransitioning = false;
+
     state.player.play(resource);
     state.connection.subscribe(state.player);
 
@@ -552,20 +844,44 @@ async function playNextInGuild(guildId, forceSkipLoopTrack = false) {
     }
 
     if (state.textChannel) {
+      // Delete previous Now Playing message to keep channel clean (zero spam!)
+      if (state.nowPlayingMsg) {
+        state.nowPlayingMsg.delete().catch(() => {});
+        state.nowPlayingMsg = null;
+      }
+
+      // Fetch related/suggested tracks if we don't already have search results
+      if (!state.lastSearchResults || state.lastSearchResults.length === 0) {
+        try {
+          state.lastSearchResults = await fastYouTubeInnertubeSearch(
+            `${nextTrack.artist && nextTrack.artist !== 'YouTube' ? nextTrack.artist : nextTrack.title} official`,
+            8
+          );
+        } catch (e) {}
+      }
+
       const embed = buildNowPlayingEmbed(state, nextTrack);
-      const components = buildPlayerControlRows(state);
+      const components = buildPlayerControlRows(state, state.lastSearchResults);
       state.nowPlayingMsg = await state.textChannel
         .send({ embeds: [embed], components })
         .catch(() => null);
     }
   } catch (err) {
     console.error('Stream error:', err.message);
-    if (state.textChannel) {
-      state.textChannel
-        .send(`⚠️ Không thể phát bài **${nextTrack.title}**, đang tự động chuyển bài tiếp theo...`)
-        .catch(() => {});
+    state.consecutiveErrors = (state.consecutiveErrors || 0) + 1;
+    state.isTransitioning = false;
+
+    if (state.consecutiveErrors >= 2 || state.queue.length === 0) {
+      state.currentTrack = null;
+      if (state.textChannel) {
+        state.textChannel
+          .send(`⚠️ Không thể phát bài **${nextTrack.title}** (Video bị giới hạn hoặc lỗi luồng). Đã dừng tự động chuyển bài để tránh spam!`)
+          .catch(() => {});
+      }
+      return;
     }
-    setTimeout(() => playNextInGuild(guildId, true), 1000);
+
+    setTimeout(() => playNextInGuild(guildId, true), 1500);
   }
 }
 
@@ -593,7 +909,8 @@ async function ensureVoiceConnection(state, voiceChannel) {
       channelId: voiceChannel.id,
       guildId: voiceChannel.guild.id,
       adapterCreator: voiceChannel.guild.voiceAdapterCreator,
-      selfDeaf: true
+      selfDeaf: false,
+      selfMute: false
     });
     try {
       await entersState(state.connection, VoiceConnectionStatus.Ready, 15_000);
@@ -606,21 +923,49 @@ async function ensureVoiceConnection(state, voiceChannel) {
 const slashCommands = [
   new SlashCommandBuilder()
     .setName('play')
-    .setDescription('Tìm và phát nhạc từ YouTube / Playlist / Spotify qua API LoveTunes')
+    .setDescription('Tìm và phát mọi video/nhạc từ YouTube, Playlist, Spotify (Có gợi ý video trực tiếp)')
     .addStringOption(opt =>
       opt.setName('query')
-        .setDescription('Tên bài hát, lời bài hát, ca sĩ hoặc link YouTube / Playlist / Spotify')
+        .setDescription('Gõ tên bài hát, vlog, ca sĩ hoặc dán link YouTube / Playlist / Spotify')
         .setRequired(true)
         .setAutocomplete(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('filter')
+        .setDescription('Bộ lọc tìm kiếm YouTube (Nhạc, MV/Video, Lofi, Remix, Karaoke, Live)')
+        .setRequired(false)
+        .addChoices(
+          { name: '🌐 Tất cả YouTube (Mặc định)', value: 'all' },
+          { name: '🎵 Chỉ Nhạc / Official Audio', value: 'music' },
+          { name: '🎬 MV / Video / Vlog', value: 'mv' },
+          { name: '📻 Lofi / Chill / Acoustic', value: 'lofi' },
+          { name: '🔥 Remix / TikTok Trend', value: 'remix' },
+          { name: '🎤 Karaoke / Beat', value: 'karaoke' },
+          { name: '🎙️ Live / Concert', value: 'live' }
+        )
     ),
   new SlashCommandBuilder()
     .setName('search')
-    .setDescription('Tìm kiếm Top 10 kết quả từ YouTube và chọn đúng bản nhạc bạn muốn phát')
+    .setDescription('Tìm kiếm Top 10 kết quả từ YouTube theo bộ lọc và chọn đúng bản bạn muốn phát')
     .addStringOption(opt =>
       opt.setName('query')
         .setDescription('Từ khóa tìm kiếm trên YouTube')
         .setRequired(true)
         .setAutocomplete(true)
+    )
+    .addStringOption(opt =>
+      opt.setName('filter')
+        .setDescription('Bộ lọc tìm kiếm YouTube')
+        .setRequired(false)
+        .addChoices(
+          { name: '🌐 Tất cả YouTube', value: 'all' },
+          { name: '🎵 Chỉ Nhạc / Official Audio', value: 'music' },
+          { name: '🎬 MV / Video / Vlog', value: 'mv' },
+          { name: '📻 Lofi / Chill', value: 'lofi' },
+          { name: '🔥 Remix / TikTok', value: 'remix' },
+          { name: '🎤 Karaoke / Beat', value: 'karaoke' },
+          { name: '🎙️ Live / Concert', value: 'live' }
+        )
     ),
   new SlashCommandBuilder()
     .setName('skip')
@@ -672,6 +1017,9 @@ const slashCommands = [
     .setName('webroom')
     .setDescription('Xem trạng thái phòng nghe nhạc đôi trên web thinhyeuthaonhu.onrender.com'),
   new SlashCommandBuilder()
+    .setName('youtube')
+    .setDescription('Mở Giao Diện Trang Chủ & Tìm Kiếm YouTube trực quan (Bấm nút tìm kiếm như trên YouTube)'),
+  new SlashCommandBuilder()
     .setName('stop')
     .setDescription('Dừng nhạc, xóa hàng đợi và rời kênh thoại')
 ].map(cmd => cmd.toJSON());
@@ -684,7 +1032,13 @@ async function registerSlashCommands() {
     await rest.put(Routes.applicationCommands(clientId), {
       body: slashCommands
     });
-    console.log('✅ Đã đăng ký đầy đủ 12 Slash Commands (/play, /search, /skip, /pause, /resume, /loop, /autoplay, /volume, /lyrics, /queue, /webroom, /stop)');
+    // Also register per-guild for 0-second instant update!
+    for (const guild of client.guilds.cache.values()) {
+      await rest.put(Routes.applicationGuildCommands(clientId, guild.id), {
+        body: slashCommands
+      }).catch(() => {});
+    }
+    console.log('✅ Đã đăng ký đầy đủ 13 Slash Commands (/youtube, /play, /search, /skip, /pause, /resume, /loop, /autoplay, /volume, /lyrics, /queue, /webroom, /stop)');
   } catch (err) {
     console.warn('⚠️ Không thể đăng ký Slash Commands:', err.message);
   }
@@ -692,35 +1046,137 @@ async function registerSlashCommands() {
 
 // ----------------- Discord Event Handlers -----------------
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`🌸 Bot Discord đã đăng nhập thành công: ${client.user.tag}`);
   console.log(`🔗 Kết nối API LoveTunes: ${API_BASE} (Phòng mặc định: ${DEFAULT_ROOM})`);
-  console.log(`🎧 Engine âm thanh: Innertube ANDROID_VR + FFmpeg (${FFMPEG_BIN}) + yt-dlp`);
+  console.log(`🎧 Engine âm thanh: yt-dlp 2026 (${YTDLP_BIN}) + FFmpeg (${FFMPEG_BIN})`);
   registerSlashCommands();
+
+  // Keep LoveTunes Render server warm 24/7 so API never cold-sleeps
+  setInterval(() => {
+    fetch(`${API_BASE}/api/ping`).catch(() => {});
+  }, 4 * 60 * 1000);
+
+  // Check active voice channels, clean up old bot messages, and post the YouTube Home Hub in #chung
+  for (const guild of client.guilds.cache.values()) {
+    let hubPosted = false;
+    for (const channel of guild.channels.cache.values()) {
+      if (channel.isVoiceBased() && channel.members.some(m => !m.user.bot)) {
+        const botPerms = channel.permissionsFor(client.user);
+        const canConnect = botPerms?.has('Connect');
+        const canSpeak = botPerms?.has('Speak');
+        console.log(`🔊 Kênh thoại [${channel.name}] (${guild.name}) -> Quyền Kết nối: ${canConnect}, Quyền Nói (Speak): ${canSpeak}`);
+        const state = getOrCreateGuildQueue(guild.id);
+        attachPlayerListeners(state);
+        await ensureVoiceConnection(state, channel);
+      } else if (channel.isTextBased() && !channel.isVoiceBased()) {
+        try {
+          const messages = await channel.messages.fetch({ limit: 50 });
+          const botMsgs = messages.filter(m => m.author.id === client.user.id);
+          if (botMsgs.size > 0) {
+            for (const m of botMsgs.values()) {
+              await m.delete().catch(() => {});
+            }
+          }
+          if (!hubPosted && /chung|general|music|nhạc/i.test(channel.name)) {
+            await channel.send(buildYouTubeHomeCard());
+            hubPosted = true;
+            console.log(`📺 Đã hiển thị Giao Diện Trang Chủ YouTube tại kênh #${channel.name}`);
+          }
+        } catch (e) {}
+      }
+    }
+  }
 });
 
 // Handle Autocomplete, Slash Commands, Buttons & Dropdown Menus
 client.on('interactionCreate', async (interaction) => {
-  // 1. Autocomplete for /play and /search
+  // 1. Autocomplete for /play and /search (Instant YouTube Videos + Suggestions!)
   if (interaction.isAutocomplete()) {
     if (interaction.commandName === 'play' || interaction.commandName === 'search') {
-      const focused = interaction.options.getFocused();
-      if (!focused || focused.trim().length < 2) {
-        return interaction.respond([]).catch(() => {});
-      }
-      const choices = await apiAutocomplete(focused);
-      return interaction.respond(choices).catch(() => {});
+      const focused = interaction.options.getFocused() || '';
+      const filterType = interaction.options.getString('filter') || '';
+      const choices = await apiAutocomplete(focused, filterType);
+      return interaction.respond(choices).catch((err) => {
+        console.warn('Autocomplete respond error:', err.message);
+      });
     }
     return;
   }
 
-  // 2. Interactive Buttons on Now Playing Card
+  // 2. Interactive Buttons on YouTube Home Hub & Now Playing Card
   if (interaction.isButton()) {
     const { customId, guild } = interaction;
     if (!guild) return;
+
+    // A. Open Popup YouTube Search Box (Works anytime, even when nothing is playing!)
+    if (customId === 'btn_open_search_modal') {
+      const modal = new ModalBuilder()
+        .setCustomId('modal_youtube_search')
+        .setTitle('🔍 Tìm Kiếm Nhạc & Video YouTube');
+
+      const queryInput = new TextInputBuilder()
+        .setCustomId('youtube_query_input')
+        .setLabel('Gõ tên bài hát, vlog, ca sĩ hoặc dán link:')
+        .setPlaceholder('VD: Sơn Tùng, st25, lofi chill, vlog ẩm thực...')
+        .setStyle(TextInputStyle.Short)
+        .setRequired(true);
+
+      modal.addComponents(new ActionRowBuilder().addComponents(queryInput));
+      return interaction.showModal(modal).catch(() => {});
+    }
+
+    // B. Quick Category Chip Buttons on YouTube Home Hub
+    const catQueryMap = {
+      btn_cat_vpop: 'nhạc trẻ việt nam hot nhất hiện nay official',
+      btn_cat_lofi: 'lofi chill tiếng mưa học bài thư giãn',
+      btn_cat_remix: 'nhạc remix tiktok thịnh hành hay nhất',
+      btn_cat_couple: 'nhạc tình yêu đôi lứa ngọt ngào lãng mạn'
+    };
+    if (catQueryMap[customId]) {
+      await interaction.deferReply();
+      const q = catQueryMap[customId];
+      const data = await apiSearchMusic(q, 10);
+      const results = data.results || [];
+      if (results.length === 0) {
+        return interaction.editReply('❌ Không tải được danh sách chủ đề lúc này.');
+      }
+      const state = getOrCreateGuildQueue(guild.id);
+      state.lastSearchResults = results;
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId('select_youtube_instant_play')
+        .setPlaceholder('🎬 Bấm vào đây để chọn Video bạn muốn phát ngay...')
+        .addOptions(
+          results.slice(0, 10).map((t, i) => ({
+            label: safeTruncate(`${i + 1}. ${t.title}`, 92),
+            description: safeTruncate(`${t.artist || 'YouTube'} • ⏱️ ${t.duration || 'LIVE'}`, 92),
+            value: t.id
+          }))
+        );
+
+      const embed = new EmbedBuilder()
+        .setColor('#ff0033')
+        .setTitle(`📺 Danh sách Video YouTube đề xuất`)
+        .setDescription(
+          results
+            .slice(0, 10)
+            .map((t, i) => `\`${i + 1}.\` **[${t.title}](${t.url})** — *${t.artist}* (\`${t.duration}\`)`)
+            .join('\n')
+        )
+        .setFooter({ text: 'Chọn bất kỳ video nào ở thanh bên dưới để phát ngay!' });
+
+      const replyMsg = await interaction.editReply({
+        embeds: [embed],
+        components: [new ActionRowBuilder().addComponents(menu)]
+      });
+      searchSessionMap.set(replyMsg.id, results);
+      return;
+    }
+
     const state = guildQueues.get(guild.id);
     if (!state || !state.currentTrack) {
-      return interaction.reply({ content: '🧸 Hiện không có bài hát nào đang phát.', ephemeral: true });
+      return interaction.reply({ content: '🧸 Hiện không có bài hát nào đang phát. Bấm nút **🔍 Tìm kiếm YouTube** để mở nhạc nhé!', ephemeral: true });
     }
 
     if (customId === 'btn_toggle') {
@@ -815,51 +1271,126 @@ client.on('interactionCreate', async (interaction) => {
     return;
   }
 
-  // 3. StringSelectMenu for /search & !find Top 10 YouTube Picker
-  if (interaction.isStringSelectMenu() && interaction.customId === 'select_youtube_track') {
+  // 2.5 Handle Popup YouTube Search Modal Submit (modal_youtube_search)
+  if (interaction.isModalSubmit() && interaction.customId === 'modal_youtube_search') {
     const { guild, member, channel } = interaction;
-    const voiceChannel = member?.voice?.channel;
+    if (!guild) return;
+    const rawQuery = (interaction.fields.getTextInputValue('youtube_query_input') || '').trim();
+    if (!rawQuery) return;
+
+    const voiceChannel = findBestVoiceChannel(guild, member);
     if (!voiceChannel) {
-      return interaction.reply({ content: '🎧 Bạn cần vào kênh thoại (Voice Channel) trước nhé!', ephemeral: true });
+      return interaction.reply({ content: '🎧 Server chưa có kênh thoại nào!', ephemeral: true });
     }
 
-    const sessionTracks = searchSessionMap.get(interaction.message.id);
-    const chosenId = interaction.values[0];
-    const chosenTrack = sessionTracks?.find(t => t.id === chosenId);
+    await interaction.deferReply();
 
-    if (!chosenTrack) {
-      return interaction.reply({ content: '⚠️ Phiên tìm kiếm đã hết hạn, vui lòng gõ `/search` lại nhé!', ephemeral: true });
-    }
+    try {
+      const data = await apiSearchMusic(rawQuery, 10);
+      const results = data.results || (data.track ? [data.track] : []);
+      if (results.length === 0) {
+        return interaction.editReply(`❌ Không tìm thấy kết quả YouTube nào cho **"${rawQuery}"**!`);
+      }
 
-    await interaction.deferUpdate();
+      const state = getOrCreateGuildQueue(guild.id);
+      attachPlayerListeners(state);
+      state.textChannel = channel;
+      state.lastSearchResults = results;
+      await ensureVoiceConnection(state, voiceChannel);
 
-    const state = getOrCreateGuildQueue(guild.id);
-    attachPlayerListeners(state);
-    state.textChannel = channel;
-    await ensureVoiceConnection(state, voiceChannel);
+      const requester = interaction.user.displayName || interaction.user.username;
+      const selectedTrack = { ...results[0], requestedBy: requester };
 
-    const requester = interaction.user.displayName || interaction.user.username;
-    const trackToQueue = { ...chosenTrack, requestedBy: requester };
-
-    if (!state.currentTrack) {
-      state.queue.push(trackToQueue);
-      await interaction.editReply({
-        content: `🎵 Đang phát bản bạn chọn: **${trackToQueue.title}** (${trackToQueue.duration})`,
-        embeds: [],
-        components: []
-      });
-      playNextInGuild(guild.id);
-    } else {
-      state.queue.push(trackToQueue);
-      prefetchNextTrack(state);
-      if (state.syncWithWebRoom) apiSyncWebRoomPlay(trackToQueue, false, requester);
-      await interaction.editReply({
-        content: `➕ Đã thêm vào hàng đợi (#${state.queue.length}): **${trackToQueue.title}** (${trackToQueue.duration})`,
-        embeds: [],
-        components: []
-      });
+      // Play immediately and let user switch to any of the other 9 results via the dropdown!
+      state.queue.unshift(selectedTrack);
+      await interaction.editReply(
+        `🔎 Tìm kiếm YouTube: **"${rawQuery}"** ➡️ Đang phát ngay kết quả #1: **${selectedTrack.title}** (\`${selectedTrack.duration || 'LIVE'}\`)\n*(Nếu muốn đổi sang kết quả khác trong Top 10, bạn bấm chọn ở thanh menu ngay dưới trình phát nhé!)*`
+      );
+      playNextInGuild(guild.id, true);
+    } catch (e) {
+      await interaction.editReply('⚠️ Có lỗi khi tìm kiếm trên YouTube, vui lòng thử lại!');
     }
     return;
+  }
+
+  // 3. StringSelectMenu Handlers (Category Explorer, Instant Video Switcher & Search Picker)
+  if (interaction.isStringSelectMenu()) {
+    const { customId, guild, member, channel } = interaction;
+    if (!guild) return;
+
+    // A. Category Explorer Dropdown on YouTube Home Card
+    if (customId === 'select_youtube_category') {
+      const categoryQuery = interaction.values[0];
+      await interaction.deferReply();
+      const data = await apiSearchMusic(categoryQuery, 10);
+      const results = data.results || [];
+      if (results.length === 0) {
+        return interaction.editReply('❌ Không tải được danh sách video lúc này.');
+      }
+      const state = getOrCreateGuildQueue(guild.id);
+      state.lastSearchResults = results;
+
+      const menu = new StringSelectMenuBuilder()
+        .setCustomId('select_youtube_instant_play')
+        .setPlaceholder('🎬 Chọn Video trong danh sách để phát ngay...')
+        .addOptions(
+          results.slice(0, 10).map((t, i) => ({
+            label: safeTruncate(`${i + 1}. ${t.title}`, 92),
+            description: safeTruncate(`${t.artist || 'YouTube'} • ⏱️ ${t.duration || 'LIVE'}`, 92),
+            value: t.id
+          }))
+        );
+
+      const embed = new EmbedBuilder()
+        .setColor('#ff0033')
+        .setTitle(`📺 Top 10 Video YouTube: "${categoryQuery}"`)
+        .setDescription(
+          results
+            .slice(0, 10)
+            .map((t, i) => `\`${i + 1}.\` **[${t.title}](${t.url})** — *${t.artist}* (\`${t.duration}\`)`)
+            .join('\n')
+        )
+        .setFooter({ text: 'Bấm chọn video ở thanh bên dưới để phát ngay!' });
+
+      const replyMsg = await interaction.editReply({
+        embeds: [embed],
+        components: [new ActionRowBuilder().addComponents(menu)]
+      });
+      searchSessionMap.set(replyMsg.id, results);
+      return;
+    }
+
+    // B. Instant Play / Switch Video Dropdown (select_youtube_instant_play or select_youtube_track)
+    if (customId === 'select_youtube_instant_play' || customId === 'select_youtube_track') {
+      const voiceChannel = findBestVoiceChannel(guild, member);
+      if (!voiceChannel) {
+        return interaction.reply({ content: '🎧 Không tìm thấy kênh thoại để phát nhạc!', ephemeral: true });
+      }
+
+      const state = getOrCreateGuildQueue(guild.id);
+      const sessionTracks = searchSessionMap.get(interaction.message.id) || state.lastSearchResults || [];
+      const chosenId = interaction.values[0];
+      const chosenTrack = sessionTracks.find(t => t.id === chosenId) || {
+        id: chosenId,
+        title: 'YouTube Video',
+        artist: 'YouTube',
+        duration: 'Playing',
+        url: `https://www.youtube.com/watch?v=${chosenId}`
+      };
+
+      await interaction.deferUpdate();
+      attachPlayerListeners(state);
+      state.textChannel = channel;
+      await ensureVoiceConnection(state, voiceChannel);
+
+      const requester = interaction.user.displayName || interaction.user.username;
+      const trackToPlay = { ...chosenTrack, requestedBy: requester };
+
+      // Play the chosen video immediately (just like clicking a video on YouTube!)
+      state.queue.unshift(trackToPlay);
+      playNextInGuild(guild.id, true);
+      return;
+    }
   }
 
   // 4. Slash Commands
@@ -868,9 +1399,25 @@ client.on('interactionCreate', async (interaction) => {
   const { commandName, guild, member, channel } = interaction;
   if (!guild) return;
 
+  if (commandName === 'youtube') {
+    return interaction.reply(buildYouTubeHomeCard());
+  }
+
   if (commandName === 'play') {
-    const query = interaction.options.getString('query', true);
-    const voiceChannel = member?.voice?.channel;
+    const rawQuery = interaction.options.getString('query', true);
+    const filterType = interaction.options.getString('filter') || '';
+    const filterMap = {
+      music: ' official audio',
+      mv: ' official mv',
+      lofi: ' lofi chill',
+      remix: ' remix',
+      karaoke: ' karaoke beat',
+      live: ' live'
+    };
+    const query = /^https?:\/\//i.test(rawQuery)
+      ? rawQuery
+      : `${rawQuery}${filterMap[filterType] || ''}`.trim();
+    const voiceChannel = findBestVoiceChannel(guild, member);
     if (!voiceChannel) {
       return interaction.reply({ content: '🎧 Bạn cần vào một kênh thoại (Voice Channel) trước nhé!', ephemeral: true });
     }
@@ -886,6 +1433,9 @@ client.on('interactionCreate', async (interaction) => {
       const state = getOrCreateGuildQueue(guild.id);
       attachPlayerListeners(state);
       state.textChannel = channel;
+      if (Array.isArray(data.results) && data.results.length > 1) {
+        state.lastSearchResults = data.results;
+      }
       await ensureVoiceConnection(state, voiceChannel);
 
       const requester = interaction.user.displayName || interaction.user.username;
@@ -916,7 +1466,17 @@ client.on('interactionCreate', async (interaction) => {
       await interaction.editReply('⚠️ Lỗi khi gọi API tìm nhạc. Vui lòng thử lại!');
     }
   } else if (commandName === 'search') {
-    const query = interaction.options.getString('query', true);
+    const rawQuery = interaction.options.getString('query', true);
+    const filterType = interaction.options.getString('filter') || '';
+    const filterMap = {
+      music: ' official audio',
+      mv: ' official mv',
+      lofi: ' lofi chill',
+      remix: ' remix',
+      karaoke: ' karaoke beat',
+      live: ' live'
+    };
+    const query = `${rawQuery}${filterMap[filterType] || ''}`.trim();
     await interaction.deferReply();
 
     try {
@@ -1090,7 +1650,12 @@ client.on('interactionCreate', async (interaction) => {
 
 client.on('messageCreate', async (msg) => {
   if (msg.author.bot || !msg.guild) return;
-  const content = msg.content.trim();
+  let content = msg.content.trim();
+  // Strip leading bot mention (so "@LoveTunes p Sơn Tùng" works even without MessageContent intent!)
+  if (client.user && content.startsWith(`<@${client.user.id}>`)) {
+    content = content.replace(new RegExp(`^<@!?${client.user.id}>\\s*`), '').trim();
+    if (content && !content.startsWith('!')) content = '!' + content;
+  }
 
   // !p <query> or !play <query>
   if (/^!(p|play)\s+/i.test(content)) {

@@ -1255,13 +1255,15 @@ server.listen(PORT, () => {
   console.log(`🌸 LoveTunes Server đang chạy tại: http://localhost:${PORT}`);
   console.log(`🎧 Sẵn sàng kết nối phòng nghe đôi & API cho Discord Bot!`);
 
-  // Auto-start Discord Bot in the same process if DISCORD_TOKEN is provided
-  if (process.env.DISCORD_TOKEN) {
-    try {
+  // Auto-start Discord Bot in the same process if DISCORD_TOKEN or discord-bot/.env is present
+  try {
+    const fs = require('fs');
+    const botEnvPath = path.join(__dirname, 'discord-bot', '.env');
+    if (process.env.DISCORD_TOKEN || fs.existsSync(botEnvPath)) {
       const { startDiscordBot } = require('./discord-bot/bot.js');
       startDiscordBot();
-    } catch (err) {
-      console.warn('⚠️ Không thể tự khởi động Discord Bot cùng server:', err.message);
     }
+  } catch (err) {
+    console.warn('⚠️ Không thể tự khởi động Discord Bot cùng server:', err.message);
   }
 });
